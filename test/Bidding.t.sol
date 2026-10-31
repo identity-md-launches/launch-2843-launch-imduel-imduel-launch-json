@@ -154,31 +154,26 @@ contract BiddingTest is Base {
         return blockhash(n);
     }
 
-    /// A move's bounty comes from its own team's chest, in its team's token: here Black (currency0's team) can only
-    /// take White's queen.
-    function test_aBountyIsPaidFromTheMoversChest() public {
-        uint256 b;
-        b = put(b, "a1", 6);
-        b = put(b, "g7", 5);
-        b = put(b, "h8", 14);
-        hook.setPosition(id, b, side("a1"), side("h8"), 1, 0);
+    /// A mate is paid from the LOSER's chest, in the loser's token, through the real resolve path: here Black
+    /// (currency0's team) has one legal move and it mates, so White's team (currency1's) pays.
+    function test_aMateIsPaidFromTheLosersChestInItsToken() public {
+        forcedMate(true);
         for (uint256 c; c < 2; c++) {
             MockERC20(Currency.unwrap(c == 0 ? currency0 : currency1)).approve(address(hook), type(uint256).max);
             hook.fundChest(pool, c == 1, 100e18);
         }
-        uint256 blackTeam = 1 - whiteTeam();
-        assertEq(blackTeam, 0, "currency0's team plays Black in game 0");
+        assertEq(1 - whiteTeam(), 0, "currency0's team plays Black in game 0");
         uint256 own = hook.chest(id, 0);
-        uint256 other = hook.chest(id, 1);
-        black(1e18, address(0xB0B));
+        black(1e18, address(0xB0B)); // pays 1 of currency1, the loser's token: the cap is 2
         vm.roll(st().closeBlock + 1);
-        uint256 before = MockERC20(Currency.unwrap(currency0)).balanceOf(address(0xB0B));
-        white(1e17, address(0));
-        assertEq(st().moveCaptured, 5, "Kxg7 takes the queen");
-        hook.withdraw(address(0xB0B), currency0); // recorded for the owner, claimed by anyone for it
-        assertGt(MockERC20(Currency.unwrap(currency0)).balanceOf(address(0xB0B)), before, "paid in Black's token");
-        assertLt(hook.chest(id, 0), own + 1e18, "from Black's chest");
-        assertGe(hook.chest(id, 1), other, "White's chest pays nothing");
+        white(1e17, address(0)); // plays Black's move
+        assertEq(st().gameNo, 1, "mate");
+        assertEq(hook.owed(address(0xB0B), currency1.toId()), 2e18, "a quarter of the loser's chest, capped at twice the bid");
+        assertApproxEqAbs(hook.chest(id, 1), 98e18, 1e15, "from the loser's chest (plus the playing trade's own fee)");
+        assertGe(hook.chest(id, 0), own, "the winner's chest pays nothing");
+        uint256 before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(0xB0B));
+        hook.withdraw(address(0xB0B), currency1); // recorded for the owner, claimed by anyone for it
+        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(0xB0B)) - before, 2e18 - 1, "paid in the loser's token, 1 wei kept owed");
     }
 
     // ---------------------------------------------------------------- who a trade bids for

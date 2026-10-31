@@ -9,6 +9,8 @@ import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IMDuelHook} from "../src/IMDuelHook.sol";
 import {Base} from "./Base.sol";
+import {Vm} from "forge-std/Test.sol";
+import {PoolId} from "v4-core/src/types/PoolId.sol";
 
 contract RefusesEth {
     bool public accepting;
@@ -22,8 +24,9 @@ contract RefusesEth {
     }
 }
 
-/// Fees (0.4% to the chest worth less, 0.1% slice), rewards in the mover's team token from its own chest with the 2x
-/// cap, failed payouts, withdrawals, chest funding and solvency. Main duel: currency0 = "IMD", currency1 = "$IMDUEL".
+/// Fees (0.65% to the pot worth less, 0.1% slice), the mate payout (a quarter of the loser's pot to the move that mated,
+/// at most twice what its trade paid), claims, pot funding and solvency. Main duel: currency0 = "IMD", currency1 =
+/// "$IMDUEL".
 contract MoneyTest is Base {
     using CurrencyLibrary for Currency;
 
@@ -39,44 +42,33 @@ contract MoneyTest is Base {
 
     function test_firstTradeFundsChest0AndTheSlice() public {
         trade(1, 1e18, address(0)); // pays 1e18 of currency0 (specified): both chests empty, so chest 0 and the IMD slice
-        assertEq(hook.chest(id, 0), 4e15, "0.4% of the input");
+        assertEq(hook.chest(id, 0), 6.5e15, "0.65% of the input");
         assertEq(hook.pile(currency0.toId()), 1e15, "0.1% slice in IMD");
         assertEq(hook.chest(id, 1), 0);
-        assertEq(claims(currency0), 5e15);
+        assertEq(claims(currency0), 7.5e15);
     }
 
-    /// Against snipers at launch: the main duel's chest share starts 25% higher when it opens and falls to the plain
-    /// 0.4% over five minutes, all of it to the chest. A duel opened later pays the plain 0.4% from its first trade,
-    /// opened alongside the main duel or minutes after it.
-    function test_openingSurchargeOnlyInTheMainDuel() public {
-        hook.setOpening(true);
-        PoolKey memory main = pool;
-        uint256 opened = vm.getBlockTimestamp(); // the main duel opened in setUp
-        uint24[3] memory fees = [uint24(100), 500, 1_000];
-        uint256[3] memory ages = [uint256(0), 150, 300];
-        uint256[3] memory bps = [uint256(2_540), 1_290, 40];
-        PoolKey[] memory ks = new PoolKey[](4);
-        ks[3] = main;
-        uint256 before;
-        for (uint256 i; i < 3; i++) {
-            vm.warp(opened + ages[i]);
-            vm.roll(vm.getBlockNumber() + 1);
-            // the main duel at this age: its first trade fills chest 0 from currency0, so later ones go to chest 1
-            // (worth less) from currency1, both taken from the input
-            (pool, id) = (main, main.toId());
-            (uint256 team, uint256 chestIdx) = i == 0 ? (1, 0) : (0, 1);
-            before = hook.chest(id, chestIdx);
-            trade(team, 1e18, address(0));
-            assertEq(hook.chest(id, chestIdx) - before, 1e18 * bps[i] / 10_000, "the main duel's chest share at this age");
-            // a duel opened now: no surcharge, even in the main duel's opening minutes
-            (ks[i],) = initPool(currency0, currency1, IHooks(address(hook)), fees[i], SQRT_PRICE_1_1);
-            addLiquidity(ks[i]);
-            (pool, id) = (ks[i], ks[i].toId());
-            trade(1, 1e18, address(0));
-            assertEq(hook.chest(id, 0), 4e15, "another duel pays the plain 0.4%");
+    /// URC-2: every trade emits the hook's own delta (the fee it took, in pool token order, negative from the
+    /// swapper's side) and the hook fee rate, so indexers see what the trader really paid.
+    function test_everyTradeEmitsHookSwapWithTheHookFee() public {
+        vm.recordLogs();
+        trade(1, 1e18, address(0)); // pays 1e18 of currency0: the chest share and the slice both fall in currency0
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 n;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] != HOOK_SWAP) continue;
+            n++;
+            assertEq(logs[i].topics[1], PoolId.unwrap(id), "the pool");
+            assertEq(address(uint160(uint256(logs[i].topics[2]))), address(swapRouter), "the sender of the swap");
+            (int128 a0, int128 a1, uint24 rate) = abi.decode(logs[i].data, (int128, int128, uint24));
+            assertEq(a0, -7.5e15, "0.75% of the input, paid by the swapper");
+            assertEq(a1, 0, "nothing taken in the output");
+            assertEq(rate, 7_500, "the hook fee in pips");
         }
-        assertSolvent(currency0, ks, nobody());
-        assertSolvent(currency1, ks, nobody());
+        assertEq(n, 1, "one HookSwap per swap");
+        vm.recordLogs();
+        trade(1, TINY, address(0)); // a dust trade: its fee rounds to zero, so the hook took nothing and says nothing
+        assertEq(count(vm.getRecordedLogs(), HOOK_SWAP), 0, "no HookSwap without a hook delta");
     }
 
     function test_chestShareGoesToTheChestWorthLess() public {
@@ -86,9 +78,9 @@ contract MoneyTest is Base {
         uint256 received = currency1.balanceOfSelf() - before;
         uint256 toChest1 = hook.chest(id, 1);
         assertGt(toChest1, 0);
-        assertEq(toChest1, (received + toChest1) * 40 / 10_000, "0.4% of the output, in currency1");
+        assertEq(toChest1, (received + toChest1) * 65 / 10_000, "0.65% of the output, in currency1");
         assertEq(hook.pile(currency0.toId()), 2e15, "the slice stays in IMD");
-        assertEq(hook.chest(id, 0), 4e15, "chest 0 unchanged");
+        assertEq(hook.chest(id, 0), 6.5e15, "chest 0 unchanged");
         assertSolvent(nobody());
     }
 
@@ -109,7 +101,7 @@ contract MoneyTest is Base {
         swapRouter.swap(pool, SwapParams(true, -100e18, SQRT_PRICE_1_1 * 99_999 / 100_000), PoolSwapTest.TestSettings(false, false), "");
         assertEq(currency0.balanceOfSelf(), before, "nothing paid");
         swapRouter.swap(pool, SwapParams(true, -1e18, SQRT_PRICE_1_1 * 99_999 / 100_000), PoolSwapTest.TestSettings(false, false), "");
-        assertEq(claims(currency0), 5e15, "a trade that fits inside its limit goes through, at 0.5%");
+        assertEq(claims(currency0), 7.5e15, "a trade that fits inside its limit goes through, at 0.75%");
     }
 
     /// Exact output with the chest share in the output (the specified side, taken before the swap): the trader gets
@@ -120,7 +112,7 @@ contract MoneyTest is Base {
         uint256 before = currency1.balanceOfSelf();
         swap(pool, true, 1e18, ""); // exact output of 1 currency1
         assertEq(currency1.balanceOfSelf() - before, 1e18, "exactly what was asked for");
-        assertEq(hook.chest(id, 1), 4e15, "0.4% of the output, taken before the swap");
+        assertEq(hook.chest(id, 1), 6.5e15, "0.65% of the output, taken before the swap");
     }
 
     function test_exactOutputPaysTheFeeOnTheInput() public {
@@ -131,7 +123,7 @@ contract MoneyTest is Base {
         assertEq(currency1.balanceOfSelf() - outBefore, 1e18, "the specified output is preserved");
         uint256 fee = claims(currency0);
         uint256 poolIn = spent - fee;
-        assertEq(fee, poolIn * 40 / 10_000 + poolIn * 10 / 10_000, "0.4% + 0.1% of the pool's input");
+        assertEq(fee, poolIn * 65 / 10_000 + poolIn * 10 / 10_000, "0.65% + 0.1% of the pool's input");
         assertEq(hook.chest(id, 0) + hook.pile(currency0.toId()), fee);
     }
 
@@ -142,98 +134,105 @@ contract MoneyTest is Base {
         hook.fundChest(pool, true, 100e18);
     }
 
-    function rookTakesQueen(bool blackMoves, address owner, uint256 cap) internal {
-        uint256 b;
-        b = put(b, "e1", 6);
-        b = put(b, "e8", 14);
-        if (blackMoves) {
-            b = put(b, "a1", 5); // white queen
-            b = put(b, "a8", 12); // black rook
-        } else {
-            b = put(b, "a1", 4);
-            b = put(b, "a8", 13); // black queen
-        }
-        hook.setPosition(id, b, side("e1"), side("e8"), blackMoves ? 1 : 0, 0);
-        hook.applyMove(pool, blackMoves ? mv("a8", "a1") : mv("a1", "a8"), owner, cap); // takes the queen, with check
+    /// White's rook mates on a8 (Kg1, rook on a`file`; Black: king on g8 or h8 behind pawns f7, g7, h7), played for
+    /// `owner` whose trade paid `paid`, at half-move `ply` (even: White to move).
+    function rookMate(uint16 ply, address owner, uint256 paid) internal {
+        hook.setGameIn(id, WELL_TRADED, WELL_TRADED); // a well-traded game
+        hook.setPosition(id, matingBoard("a1", "h8"), side("g1"), side("h8"), ply, 0);
+        hook.applyMove(pool, mv("a1", "a8"), owner, paid);
     }
 
-    /// The token a team is paid in: its own (0: currency0, 1: currency1).
+    function matingBoard(string memory rook, string memory king) internal pure returns (uint256 b) {
+        b = put(b, "g1", 6);
+        b = put(b, rook, 4);
+        b = put(b, king, 14);
+        b = put(b, "f7", 9);
+        b = put(b, "g7", 9);
+        b = put(b, "h7", 9);
+    }
+
+    /// The token a team is paid in when it wins: the loser's (0: currency0, 1: currency1).
     function teamToken(uint256 team) internal view returns (Currency) {
         return team == 0 ? currency0 : currency1;
     }
 
-    function finalize() internal {
-        next(12);
-        trade(0, TINY, address(0));
-    }
-
-    /// What `who` claims in `c`: rewards are recorded, never pushed, and anyone may trigger the claim.
+    /// What `who` claims in `c`: rewards are recorded, never pushed, and anyone may trigger the claim. A claim keeps 1
+    /// wei owed, so the next reward updates the slot rather than creating it.
     function claimed(address who, Currency c) internal returns (uint256) {
         vm.prank(address(0xDEAD));
         hook.withdraw(who, c);
         return c.balanceOf(who);
     }
 
-    function test_whiteCaptureIsPaidInItsTeamTokenFromItsOwnChest() public {
-        fund();
-        uint256 w = whiteTeam(); // game 0: $IMDUEL's team (currency1), the token people buy
-        rookTakesQueen(false, address(0xA11CE), 1e30);
-        finalize();
-        assertEq(hook.owed(address(0xA11CE), teamToken(w).toId()), 3e18, "recorded for the owner to claim");
-        assertEq(teamToken(w).balanceOf(address(0xA11CE)), 0, "nothing is pushed inside the trade");
-        assertEq(claimed(address(0xA11CE), teamToken(w)), 3e18, "queen 2.7% + check 0.3% of a 100-token chest");
-        assertEq(hook.owed(address(0xA11CE), teamToken(w).toId()), 0);
-        assertEq(hook.chest(id, w), 97e18);
-        assertEq(hook.chest(id, 1 - w), 100e18, "the other team's chest is untouched");
-        assertSolvent(nobody());
-    }
-
-    function test_blackCaptureIsPaidInItsTeamToken() public {
-        fund();
-        uint256 b = 1 - whiteTeam(); // game 0: IMD's team
-        rookTakesQueen(true, address(0xB0B), 1e30);
-        finalize();
-        assertEq(claimed(address(0xB0B), teamToken(b)), 3e18);
-        assertEq(hook.chest(id, b), 97e18);
-    }
-
-    function test_payoutIsCappedAtTwiceTheTrade() public {
-        fund();
-        rookTakesQueen(false, address(0xA11CE), 1e18); // the move's trade received 0.5e18: cap 1e18
-        finalize();
-        assertEq(claimed(address(0xA11CE), teamToken(whiteTeam())), 1e18, "capped");
-        assertEq(hook.chest(id, whiteTeam()), 99e18, "the rest stays in the chest");
-    }
-
-    function test_checkmatePaysAQuarterOfTheChest() public {
+    function test_capturesAndChecksPayNothing() public {
         fund();
         uint256 b;
-        b = put(b, "g1", 6);
+        b = put(b, "e1", 6);
+        b = put(b, "e8", 14);
         b = put(b, "a1", 4);
-        b = put(b, "h8", 14);
-        b = put(b, "g7", 9);
-        b = put(b, "h7", 9);
-        hook.setPosition(id, b, side("g1"), side("h8"), 0, 0);
-        uint256 w = whiteTeam(); // read before the mate starts game 1 with colours swapped
-        hook.applyMove(pool, mv("a1", "a8"), address(0xA11CE), 1e30);
-        finalize();
-        assertEq(claimed(address(0xA11CE), teamToken(w)), 25.3e18, "mate 25% + check 0.3%");
+        b = put(b, "a8", 13); // a black queen
+        hook.setPosition(id, b, side("e1"), side("e8"), 0, 0);
+        hook.applyMove(pool, mv("a1", "a8"), address(0xA11CE), 1e30); // takes the queen, with check
+        assertEq(hook.owed(address(0xA11CE), currency0.toId()) + hook.owed(address(0xA11CE), currency1.toId()), 0);
+        assertEq(hook.chest(id, 0), 100e18);
+        assertEq(hook.chest(id, 1), 100e18);
     }
 
-    function test_quietMovePaysNothing() public {
+    /// A mate takes a quarter of the LOSER's pot for the move that mated, in the loser's token.
+    function test_mateTakesAQuarterOfTheLosersPot() public {
+        fund();
+        uint256 w = whiteTeam(); // read before the mate starts game 1 with colours swapped
+        rookMate(0, address(0xA11CE), 1e30);
+        assertEq(hook.owed(address(0xA11CE), teamToken(1 - w).toId()), 25e18, "a quarter of 100, in the loser's token");
+        assertEq(hook.chest(id, 1 - w), 75e18, "taken from the loser's pot");
+        assertEq(hook.chest(id, w), 100e18, "the winner's pot is untouched");
+        assertEq(claimed(address(0xA11CE), teamToken(1 - w)), 25e18 - 1, "claimed, but for the 1 wei kept owed");
+        assertEq(hook.owed(address(0xA11CE), teamToken(1 - w).toId()), 1);
+        assertSolvent(alice());
+    }
+
+    function alice() internal pure returns (address[] memory who) {
+        who = new address[](1);
+        who[0] = address(0xA11CE);
+    }
+
+    function test_theMateIsCappedAtTwiceWhatItsTradePaid() public {
+        fund();
+        uint256 w = whiteTeam();
+        rookMate(0, address(0xA11CE), 1e18); // the mating move's trade paid 1 token: it earns at most 2
+        assertEq(hook.owed(address(0xA11CE), teamToken(1 - w).toId()), 2e18, "capped");
+        assertEq(hook.chest(id, 1 - w), 98e18, "the rest stays in the pot");
+        assertSolvent(alice());
+    }
+
+    /// A mate played for nobody (a timeout move) pays nobody: the pot keeps it all.
+    function test_aMateForNobodyPaysNobody() public {
+        fund();
+        uint256 w = whiteTeam();
+        vm.recordLogs();
+        rookMate(0, address(0), 0);
+        assertEq(hook.chest(id, 1 - w), 100e18, "nothing leaves the loser's pot");
+        assertEq(hook.chest(id, w), 100e18);
+        assertEq(count(vm.getRecordedLogs(), MATE_PAID), 0);
+    }
+
+    function test_theMateIsCountedForItsOwner() public {
+        fund();
+        uint256 w = whiteTeam();
+        address a = address(0xA11CE);
+        vm.recordLogs();
+        rookMate(0, a, 1e30);
+        assertEq(count(vm.getRecordedLogs(), MATE_PAID), 1);
+        (, uint256 rare) = hook.stats(a);
+        assertEq(rare & 0xffff, 1, "one mating move");
+        // the amount won in units of 10^15 wei, in the loser's token: IMD (currency0) at bit 140, $IMDUEL at 180
+        assertEq((rare >> (1 - w == 0 ? 140 : 180)) & ((1 << 40) - 1), 25_000, "25 tokens won");
+    }
+
+    function test_quietMovesPayNothing() public {
         fund();
         hook.applyMove(pool, mv("e2", "e4"), address(0xA11CE), 1e30);
-        finalize();
         assertEq(hook.owed(address(0xA11CE), currency0.toId()) + hook.owed(address(0xA11CE), currency1.toId()), 0);
-    }
-
-    function test_bountyTable() public view {
-        assertEq(hook.bountyBps(1, false, false), 30);
-        assertEq(hook.bountyBps(2, false, false), 90);
-        assertEq(hook.bountyBps(3, false, false), 90);
-        assertEq(hook.bountyBps(4, false, false), 150);
-        assertEq(hook.bountyBps(5, true, false), 300);
-        assertEq(hook.bountyBps(0, true, true), 2_530);
     }
 
     // ---------------------------------------------------------------- withdrawals
@@ -258,20 +257,34 @@ contract MoneyTest is Base {
         hook.fundChest{value: 100 ether}(pool, false, 100 ether);
         address refuser = address(new RefusesEth());
         vm.recordLogs();
-        rookTakesQueen(false, refuser, 1e30); // played: the reward is recorded
+        // the mating team wins the loser's ETH: White mates if White is currency1's team, else Black does
+        if (whiteTeam() == 1) {
+            rookMate(0, refuser, 1e30);
+        } else {
+            uint256 b;
+            b = put(b, "g8", 14);
+            b = put(b, "a8", 12);
+            b = put(b, "h1", 6);
+            b = put(b, "f2", 1);
+            b = put(b, "g2", 1);
+            b = put(b, "h2", 1);
+            hook.setGameIn(id, WELL_TRADED, WELL_TRADED);
+            hook.setPosition(id, b, side("h1"), side("g8"), 1, 0);
+            hook.applyMove(pool, mv("a8", "a1"), refuser, 1e30);
+        }
         next(12);
         swapNativeInput(pool, true, -int256(TINY), "", TINY); // trading goes on
-        assertEq(hook.owed(refuser, 0), 3 ether, "recorded");
+        assertEq(hook.owed(refuser, 0), 25 ether, "recorded: a quarter of the ETH pot");
         assertEq(refuser.balance, 0);
-        assertEq(count(vm.getRecordedLogs(), REWARD), 1);
+        assertEq(count(vm.getRecordedLogs(), MATE_PAID), 1);
         vm.expectRevert(); // it can't take ETH yet
         hook.withdraw(refuser, CurrencyLibrary.ADDRESS_ZERO);
         RefusesEth(payable(refuser)).acceptEth();
         vm.prank(address(0xDEAD)); // anyone may retry; only the reward owner receives it
         hook.withdraw(refuser, CurrencyLibrary.ADDRESS_ZERO);
-        assertEq(refuser.balance, 3 ether);
-        assertEq(hook.owed(refuser, 0), 0);
-        assertEq(claims(CurrencyLibrary.ADDRESS_ZERO), hook.chest(id, 0));
+        assertEq(refuser.balance, 25 ether - 1);
+        assertEq(hook.owed(refuser, 0), 1, "1 wei stays owed");
+        assertEq(claims(CurrencyLibrary.ADDRESS_ZERO), hook.chest(id, 0) + 1);
     }
 
     // ---------------------------------------------------------------- funding a chest
@@ -327,7 +340,7 @@ contract MoneyTest is Base {
 
     // ---------------------------------------------------------------- solvency
 
-    /// Random trading with real engine moves (captures pay out along the way): held always equals owed.
+    /// Random trading with real engine moves (mates pay out along the way): held always equals owed.
     /// forge-config: default.fuzz.runs = 48
     function testFuzz_heldEqualsOwed(uint256 seed) public {
         fund();

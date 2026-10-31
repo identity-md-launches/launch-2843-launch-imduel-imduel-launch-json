@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-/// How strongly a trade's move is played: from its share of the pool, never from other traders' sizes
-///. +30% per tenfold share: 0% at 0.001% of the in-range depth of the token the trade pays
-/// with, 30% at 0.01%, 60% at 0.1%, the 90% cap from 1%.
+/// How strongly a trade's move is played: from what it received as a share of its own team's pot, which only money given to the game moves. +30% per tenfold share: 0% at 0.1% of the pot, 30% at 1%,
+/// 60% at 10%, the 90% cap from the whole pot. An empty pot plays at the cap; a trade that received nothing at 0.
 library Strength {
     uint256 internal constant MAX_BPS = 9_000;
     uint256 internal constant BPS_PER_DOUBLING = 903; // 3,000 per tenfold / log2(10)
-    uint256 internal constant FLOOR = 100_000; // a share of 1 / FLOOR plays at 0
-    uint256 internal constant FLOOR_BITS = 17; // 2^17 > FLOOR: a payment shifted this far times FLOOR always fits
+    uint256 internal constant FLOOR = 1_000; // a share of 1 / FLOOR plays at 0
+    uint256 internal constant FLOOR_BITS = 10; // 2^10 > FLOOR: a payment shifted this far times FLOOR always fits
 
-    /// Strength in basis points of a trade paying `paid` into `depth` (both in the same token).
+    /// Strength in basis points of a trade that received `paid` against a pot of `depth` (both in the same token).
     function fromShare(uint256 paid, uint256 depth) internal pure returns (uint16) {
-        if (paid == 0 || depth == 0) return 0;
-        if (paid >= depth) return uint16(MAX_BPS); // the whole depth or more: far past the cap
+        if (paid == 0) return 0;
+        if (paid >= depth) return uint16(MAX_BPS); // the whole pot or more (an empty pot too): the cap
         // a payment too large to scale by FLOOR: shift both out of the way (the share is what counts, and both keep
         // their fraction bits), instead of reverting
         if (paid > type(uint256).max / FLOOR) {

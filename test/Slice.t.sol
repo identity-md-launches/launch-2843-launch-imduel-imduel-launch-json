@@ -110,7 +110,7 @@ contract SliceTest is Base {
         pay(duelX, imd, 10e18);
         assertGt(mainChest(), chestBefore, "the main $IMDUEL chest grew");
         assertGt(burned(), 0);
-        assertGt(hook.chest(duelX.toId(), 0) + hook.chest(duelX.toId(), 1), 0, "the duel keeps its 0.4%");
+        assertGt(hook.chest(duelX.toId(), 0) + hook.chest(duelX.toId(), 1), 0, "the duel keeps its 0.65%");
     }
 
     function test_imduelDuelsNeedNoSwap() public {

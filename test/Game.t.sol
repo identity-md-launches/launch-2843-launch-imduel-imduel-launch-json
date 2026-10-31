@@ -74,7 +74,17 @@ contract GameTest is Base {
     function test_anyTradeSizeBids() public {
         white(1_000, address(0xD)); // dust: no minimum trade
         assertEq(bid().owner, address(0xD));
-        assertEq(bid().strength, 0, "dust bids at the engine's base strength");
+        assertEq(bid().strength, 9_000, "against an empty pot even dust plays at the cap");
+        playTurn();
+        black(1e18, address(0xB));
+        playTurn();
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundChest(pool, false, 1e21);
+        hook.fundChest(pool, true, 1e21);
+        white(1_000, address(0xD));
+        assertEq(bid().owner, address(0xD));
+        assertEq(bid().strength, 0, "against a pot, dust plays at the engine's base strength");
     }
 
     function test_theBiggestTradeInTheBlockOwnsTheTurn() public {
@@ -167,10 +177,20 @@ contract GameTest is Base {
 
     // ---------------------------------------------------------------- strength
 
-    /// The pool holds 1e24 of each token in range at price 1, so a trade's share is amountIn / 1e24:
-    /// +30% per tenfold (0.001% 0, 0.01% 30%, 0.1% 60%, 1% and up 90%).
-    function test_strengthFollowsTheShareOfThePool() public {
-        uint256[4] memory amounts = [uint256(1e19), 1e20, 1e21, 1e22];
+    /// Strength is what the trade received as a share of its own team's pot, read when it bids: +30% per tenfold
+    /// (0.1% 0, 1% 30%, 10% 60%, the whole pot and up 90%). An empty pot plays at 90%. Pots of 1,000 tokens; the pool
+    /// (1e24 a side) barely moves for these trades, so what a trade receives is about what it pays.
+    function test_strengthFollowsTheShareOfTheTeamsPot() public {
+        white(1e18, address(0xA));
+        assertEq(bid().strength, 9_000, "an empty pot: the cap");
+        playTurn();
+        black(1e18, address(0xB));
+        playTurn();
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundChest(pool, false, 1e21);
+        hook.fundChest(pool, true, 1e21);
+        uint256[4] memory amounts = [uint256(1e18), 1e19, 1e20, 1e21];
         uint256[4] memory want = [uint256(0), 3_000, 6_000, 9_000];
         for (uint256 i; i < 4; i++) {
             white(amounts[i], address(0xA));

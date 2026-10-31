@@ -26,7 +26,8 @@ abstract contract Base is Chessboard, V4Fixture {
     bytes32 constant BID = keccak256("Bid(bytes32,uint32,uint16,address,uint256,uint16)");
     bytes32 constant OVER = keccak256("GameOver(bytes32,uint32,uint8,uint16)");
     bytes32 constant FAILED = keccak256("EngineFailed(bytes32,uint32,uint16)");
-    bytes32 constant REWARD = keccak256("Reward(bytes32,uint32,uint16,address,address,uint256)");
+    bytes32 constant MATE_PAID = keccak256("MatePaid(bytes32,uint32,address,address,uint256)");
+    bytes32 constant HOOK_SWAP = keccak256("HookSwap(bytes32,address,int128,int128,uint24)");
 
     IChessEngine engine;
     IMDuelHarness hook;
@@ -93,6 +94,45 @@ abstract contract Base is Chessboard, V4Fixture {
     /// The team playing White in the current game: in game 0 the side the slice isn't taken in, then alternating.
     function whiteTeam() internal view returns (uint256) {
         return (st().gameNo & 1) ^ (st().slice ^ 1);
+    }
+
+    uint256 constant WELL_TRADED = 1e24; // a game's inflow per pot that never binds the mate's inflow cap in a test
+
+    /// Plays a mate in one against team `loser` through the harness (recorded and paid at once), at the end of a
+    /// well-traded game: White's rook on a8 if White is the other team, else Black's rook on a1; the mating move is
+    /// owned by `owner`, whose trade paid `paid`.
+    function mateAgainst(uint256 loser, address owner, uint256 paid) internal {
+        mateAgainstIn(loser, owner, paid, WELL_TRADED, WELL_TRADED);
+    }
+
+    /// mateAgainst after a game whose trading put `in0` and `in1` into the pots.
+    function mateAgainstIn(uint256 loser, address owner, uint256 paid, uint256 in0, uint256 in1) internal {
+        hook.setGameIn(id, in0, in1);
+        uint256 b;
+        if (whiteTeam() != loser) {
+            b = put(put(put(put(put(put(b, "g1", 6), "a1", 4), "g8", 14), "f7", 9), "g7", 9), "h7", 9);
+            hook.setPosition(id, b, side("g1"), side("g8"), 0, 0);
+            hook.applyMove(pool, mv("a1", "a8"), owner, paid);
+        } else {
+            b = put(put(put(put(put(put(b, "g8", 14), "a8", 12), "g1", 6), "f2", 1), "g2", 1), "h2", 1);
+            hook.setPosition(id, b, side("g1"), side("g8"), 1, 0);
+            hook.applyMove(pool, mv("a8", "a1"), owner, paid);
+        }
+    }
+
+    /// A position whose side to move has one legal move, and it mates: in check from a queen beside its king, the
+    /// king takes it and uncovers its rook along the back rank. White (half-move 0): Kc8xd7, Rh8 mates Ka8 behind
+    /// pawns a7, b7. Black (half-move 1): the mirror, Kc1xd2, Rh1 mates Ka1.
+    function forcedMate(bool blackMates) internal {
+        hook.setGameIn(id, WELL_TRADED, WELL_TRADED); // a well-traded game: the mate's inflow cap doesn't bind
+        uint256 b;
+        if (!blackMates) {
+            b = put(put(put(put(put(put(b, "c8", 6), "h8", 4), "a8", 14), "a7", 9), "b7", 9), "d7", 13);
+            hook.setPosition(id, b, side("c8"), side("a8"), 0, 0);
+        } else {
+            b = put(put(put(put(put(put(b, "c1", 14), "h1", 12), "a1", 6), "a2", 1), "b2", 1), "d2", 5);
+            hook.setPosition(id, b, side("a1"), side("c1"), 1, 0);
+        }
     }
 
     function white(uint256 amountIn, address owner) internal {

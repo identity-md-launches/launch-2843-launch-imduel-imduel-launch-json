@@ -11,8 +11,8 @@ import {Base} from "./Base.sol";
 import {HookConfig} from "./Harness.sol";
 
 /// Wallets send a trade with the smallest gas limit that succeeds (eth_estimateGas). At that limit the trade must
-/// still do all its work: play the queued turn, record its bounty and convert a due slice batch, none of them
-/// silently skipped for lack of gas.
+/// still do all its work: play the queued turn, record its mate's payout and convert a due slice batch, none of
+/// them silently skipped for lack of gas.
 contract GasEstimateTest is Base {
     bytes32 constant CONVERTED = keccak256("Converted(address,uint256,uint256,uint256)");
 
@@ -41,46 +41,41 @@ contract GasEstimateTest is Base {
             team == 1 ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT), PoolSwapTest.TestSettings(false, false), bytes("")));
     }
 
-    /// White in check from an unprotected queen next to its king, Kxe2 the only legal move, owned by 0xA11CE and
-    /// queued; returns the trade that plays it and the currency its bounty is paid in.
-    function queenTakenForAlice() internal returns (bytes memory play, Currency paidIn) {
+    /// White's only legal move mates (forcedMate), owned by 0xA11CE and queued; returns the trade that plays it and
+    /// the currency the mate is paid in: the loser's, Black's team's token.
+    function mateQueuedForAlice() internal returns (bytes memory play, Currency paidIn) {
         setUpMainDuel();
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
         hook.fundChest(pool, false, 100e18);
         hook.fundChest(pool, true, 100e18);
-        uint256 b;
-        b = put(b, "e1", 6);
-        b = put(b, "h1", 4);
-        b = put(b, "e2", 13);
-        b = put(b, "a8", 14);
-        b = put(b, "a7", 9);
-        hook.setPosition(id, b, side("e1"), side("a8"), 0, 0);
+        forcedMate(false);
         white(1e18, address(0xA11CE)); // owns White's turn
         next(12);
-        return (swapCall(1 - whiteTeam(), 1e17), whiteTeam() == 0 ? currency0 : currency1); // White's team's token
+        return (swapCall(1 - whiteTeam(), 1e17), whiteTeam() == 0 ? currency1 : currency0);
     }
 
-    /// The one Reward in `logs`: its amount, from the event itself.
-    function rewardAmount(Vm.Log[] memory logs) internal pure returns (uint256 amount) {
-        for (uint256 i; i < logs.length; i++) if (logs[i].topics[0] == REWARD) (,,,, amount) = abi.decode(logs[i].data, (uint32, uint16, address, address, uint256));
+    /// The one MatePaid in `logs`: its amount, from the event itself.
+    function paidAmount(Vm.Log[] memory logs) internal pure returns (uint256 amount) {
+        for (uint256 i; i < logs.length; i++) if (logs[i].topics[0] == MATE_PAID) (,,, amount) = abi.decode(logs[i].data, (uint32, address, address, uint256));
     }
 
-    function test_atTheEstimateTheBountyIsRecorded() public {
-        (bytes memory play, Currency paidIn) = queenTakenForAlice();
+    function test_atTheEstimateThePayoutIsRecorded() public {
+        (bytes memory play, Currency paidIn) = mateQueuedForAlice();
         (uint256 g, Vm.Log[] memory logs) = atMinimalGas(play); // plays it
-        emit log_named_uint("smallest gas limit that plays and records the bounty", g);
+        emit log_named_uint("smallest gas limit that plays and records the mate's payout", g);
         assertEq(count(logs, MOVED), 1);
-        assertEq(count(logs, REWARD), 1);
-        assertEq(hook.owed(address(0xA11CE), paidIn.toId()), rewardAmount(logs), "recorded for the owner");
-        assertGt(rewardAmount(logs), 0);
+        assertEq(count(logs, MATE_PAID), 1);
+        assertEq(hook.owed(address(0xA11CE), paidIn.toId()), paidAmount(logs), "recorded for the owner");
+        // the bid's size is what the pool received, net of the hook fee taken on that side
+        assertApproxEqAbs(paidAmount(logs), 2e18, 2e16, "a quarter of the loser's pot, capped at twice the 1-token bid");
     }
 
-    /// Whoever plays a move picks the gas limit, so no limit may let the trade go through without its bounty
+    /// Whoever plays a move picks the gas limit, so no limit may let the trade go through without its payout
     /// recorded. Every limit from far below to above the estimate, 1,000 gas apart (the estimate is measured first:
     /// --isolate adds about 100,000 to it).
-    function test_noGasLimitPlaysTheMoveWithoutItsBounty() public {
-        (bytes memory play, Currency paidIn) = queenTakenForAlice();
+    function test_noGasLimitPlaysTheMoveWithoutItsPayout() public {
+        (bytes memory play, Currency paidIn) = mateQueuedForAlice();
         uint256 before = vm.snapshotState();
         (uint256 estimate,) = atMinimalGas(play);
         vm.revertToState(before);
@@ -93,8 +88,8 @@ contract GasEstimateTest is Base {
             if (ok) {
                 succeeded++;
                 assertEq(count(logs, MOVED), 1, "a trade that goes through plays the move");
-                assertEq(count(logs, REWARD), 1, "and records its bounty");
-                assertEq(hook.owed(address(0xA11CE), paidIn.toId()), rewardAmount(logs), "recorded for the owner");
+                assertEq(count(logs, MATE_PAID), 1, "and records its payout");
+                assertEq(hook.owed(address(0xA11CE), paidIn.toId()), paidAmount(logs), "recorded for the owner");
             }
             vm.revertToState(snap);
         }

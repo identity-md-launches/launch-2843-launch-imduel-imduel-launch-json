@@ -30,87 +30,17 @@ contract RefusesEthUntilAsked {
     }
 }
 
-/// The fee schedule at its edges (the main duel's opening surcharge over every age, the plain 0.5% split after it),
-/// the refusals around chests and owed payouts, and the main duel's one-batch-per-block limit.
+/// The fee split (0.65% to the pot worth less, 0.1% slice, the same from a duel's first trade), the refusals around
+/// pots and owed payouts, and the main duel's one-batch-per-block limit.
 /// Main duel: currency0 = "IMD", currency1 = "$IMDUEL"; the slice is taken in IMD.
 contract FeeScheduleTest is Base {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
 
-    uint256 opened;
-
     function setUp() public {
         setUpMainDuel();
-        opened = vm.getBlockTimestamp();
         MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
-    }
-
-    /// The chest share the main duel takes at `age` seconds, by the brief: 0.4% plus up to 25% falling linearly to
-    /// nothing over the first 300 seconds.
-    function expectedChestBps(uint256 age) internal pure returns (uint256) {
-        return age >= 300 ? 40 : 40 + 2_500 * (300 - age) / 300;
-    }
-
-    /// One exact-input buy of `amount` IMD at `age`: the trader pays exactly its order, the chest gets the schedule's
-    /// share and the slice 0.1%, and the hook holds exactly both as claims.
-    function buyAt(uint256 age, uint256 amount) internal {
-        vm.warp(opened + age);
-        vm.roll(vm.getBlockNumber() + 1);
-        uint256 paidBefore = currency0.balanceOfSelf();
-        trade(1, amount, address(0));
-        assertEq(paidBefore - currency0.balanceOfSelf(), amount, "the trader pays its whole order, no more");
-        uint256 toChest = amount * expectedChestBps(age) / 10_000;
-        assertEq(hook.chest(id, 0), toChest, "chest share at this age");
-        assertEq(hook.chest(id, 1), 0, "nothing in the other chest");
-        assertEq(hook.pile(currency0.toId()), amount * 10 / 10_000, "0.1% slice");
-        assertEq(claims(currency0), toChest + amount * 10 / 10_000, "held = chest + pile");
-        assertEq(claims(currency1), 0, "nothing taken in the output");
-    }
-
-    /// forge-config: default.fuzz.runs = 512
-    function testFuzz_openingChestShareFollowsTheSchedule(uint256 age, uint256 amount) public {
-        hook.setOpening(true);
-        buyAt(bound(age, 0, 2_000), bound(amount, 1e9, 1_000e18));
-    }
-
-    function test_openingEdges() public {
-        hook.setOpening(true);
-        buyAt(0, 1e18);
-        assertEq(hook.chest(id, 0), 0.254e18, "at the opening second: 0.4% + 25%");
-    }
-
-    function test_lastSurchargeSecond() public {
-        hook.setOpening(true);
-        buyAt(299, 1e18);
-        assertEq(hook.chest(id, 0), 1e18 * 48 / 10_000, "a 300th of the surcharge is left");
-    }
-
-    function test_surchargeEndsAtThreeHundredSeconds() public {
-        hook.setOpening(true);
-        buyAt(300, 1e18);
-        assertEq(hook.chest(id, 0), 4e15, "plain 0.4% from second 300");
-    }
-
-    /// The surcharge only ever falls as the main duel ages, and is never above 25.4% or below 0.4%.
-    /// forge-config: default.fuzz.runs = 256
-    function testFuzz_surchargeNeverRises(uint256 a, uint256 b) public {
-        hook.setOpening(true);
-        a = bound(a, 0, 400);
-        b = bound(b, a, 400);
-        trade(1, 1, address(0)); // nothing taken from a wei, the chests stay empty
-        vm.warp(opened + a);
-        vm.roll(vm.getBlockNumber() + 1);
-        trade(1, 1e18, address(0));
-        uint256 first = hook.chest(id, 0);
-        // the next fee goes to chest 1 (worth less now): pay currency1
-        vm.warp(opened + b);
-        vm.roll(vm.getBlockNumber() + 1);
-        trade(0, 1e18, address(0));
-        uint256 second = hook.chest(id, 1);
-        assertLe(second, first, "the share never rises with age");
-        assertLe(first, 0.254e18);
-        assertGe(second, 4e15);
     }
 
     /// An exact-output order its price limit would stop short is refused whole (PartialFill), and nothing is paid.
@@ -129,14 +59,12 @@ contract FeeScheduleTest is Base {
         assertEq(claims(currency0) + claims(currency1), 0, "no fee kept");
     }
 
-    /// After the opening an exact-output buy delivers exactly what was asked, and the hook keeps 0.4% of the output
-    /// side (the chest worth less, here chest 1 once chest 0 holds something) plus 0.1% of the IMD input.
+    /// An exact-output buy delivers exactly what was asked, and the hook keeps 0.65% of the output side (the pot worth
+    /// less, here pot 1 once pot 0 holds something) plus 0.1% of the IMD input.
     /// forge-config: default.fuzz.runs = 256
     function testFuzz_exactOutputDeliversTheOrderAndTakesHalfAPercent(uint256 amount) public {
         amount = bound(amount, 1e9, 500e18);
-        hook.setOpening(true);
-        vm.warp(opened + 300);
-        trade(1, 1e18, address(0)); // chest 0 holds 0.4%: the next chest share goes to chest 1
+        trade(1, 1e18, address(0)); // pot 0 holds 0.65%: the next pot share goes to pot 1
         next(12);
         uint256 chest1 = hook.chest(id, 1);
         uint256 pile0 = hook.pile(currency0.toId());
@@ -144,7 +72,7 @@ contract FeeScheduleTest is Base {
         uint256 out1 = currency1.balanceOfSelf();
         swap(pool, true, int256(amount), ""); // exact output of currency1
         assertEq(currency1.balanceOfSelf() - out1, amount, "exactly the order");
-        assertEq(hook.chest(id, 1) - chest1, amount * 40 / 10_000, "0.4% of the specified output");
+        assertEq(hook.chest(id, 1) - chest1, amount * 65 / 10_000, "0.65% of the specified output");
         uint256 paid = in0 - currency0.balanceOfSelf();
         uint256 slice = hook.pile(currency0.toId()) - pile0;
         assertEq(slice, (paid - slice) * 10 / 10_000, "0.1% of what the pool took in, on top");
@@ -224,7 +152,7 @@ contract FeeScheduleTest is Base {
         );
         hook.fundChest{value: 100 ether}(pool, false, 100 ether);
         RefusesEthUntilAsked refuser = new RefusesEthUntilAsked();
-        rookTakesQueen(address(refuser));
+        mateAgainst(0, address(refuser), 1e30); // ETH's team loses: the winner is paid in ETH
         uint256 due = hook.owed(address(refuser), 0);
         assertGt(due, 0, "the refused payout is owed");
         assertEq(claims(CurrencyLibrary.ADDRESS_ZERO), hook.chest(id, 0) + due, "held = chest + owed");
@@ -244,21 +172,11 @@ contract FeeScheduleTest is Base {
         // the owner redirects it, once
         address elsewhere = address(0xE15E);
         refuser.withdrawTo(hook, CurrencyLibrary.ADDRESS_ZERO, elsewhere);
-        assertEq(elsewhere.balance, due);
-        assertEq(hook.owed(address(refuser), 0), 0);
+        assertEq(elsewhere.balance, due - 1, "all but the 1 wei kept owed");
+        assertEq(hook.owed(address(refuser), 0), 1);
         refuser.withdrawTo(hook, CurrencyLibrary.ADDRESS_ZERO, elsewhere);
-        assertEq(elsewhere.balance, due, "nothing twice");
-        assertEq(claims(CurrencyLibrary.ADDRESS_ZERO), hook.chest(id, 0), "held = chest");
-    }
-
-    function rookTakesQueen(address owner) internal {
-        uint256 b;
-        b = put(b, "e1", 6);
-        b = put(b, "e8", 14);
-        b = put(b, "a1", 4);
-        b = put(b, "a8", 13); // black queen
-        hook.setPosition(id, b, side("e1"), side("e8"), 0, 0);
-        hook.applyMove(pool, mv("a1", "a8"), owner, 1e30);
+        assertEq(elsewhere.balance, due - 1, "nothing twice");
+        assertEq(claims(CurrencyLibrary.ADDRESS_ZERO), hook.chest(id, 0) + 1, "held = pot + the 1 wei");
     }
 
     // ---------------------------------------------------------------- one main-duel batch per block

@@ -38,7 +38,7 @@ contract BrokenEngine is IChessEngine {
     }
 }
 
-/// Fails to choose and to fall back: the turn can only wait.
+/// Fails to choose and to fall back: the game can only end as a draw.
 contract DeadEngine is IChessEngine {
     function play(uint256, uint32, uint32, bool, uint256, uint256, uint64[8] calldata, uint32, uint16)
         external
@@ -115,37 +115,25 @@ contract HostileTest is Base {
         token = CurrencyLibrary.ADDRESS_ZERO;
     }
 
-    /// The token's team (White in game 0) is in check from an unprotected queen next to its king: Kxe2 is its only
-    /// move. `owner` bids for it with 1 unit of the other token; the next block's trade plays it and pays the queen's
-    /// bounty (2.7% of the team's chest, well under the 2x cap) to `owner`, through the real resolve path.
-    function queenForcedOn(address owner) internal {
-        uint256 b;
-        b = put(b, "e1", 6);
-        b = put(b, "h1", 4);
-        b = put(b, "e2", 13);
-        b = put(b, "a8", 14);
-        b = put(b, "a7", 9);
-        hook.setPosition(id, b, side("e1"), side("a8"), 0, 0);
+    /// The token's team (White in game 0) gets mated: Black's only legal move mates (forcedMate). `owner` bids for
+    /// it with 1 unit of the token; the next block's trade (White's) plays it, and the mate's payout (a quarter of the
+    /// token team's chest, capped at twice the bid: 2 units) is recorded for `owner` in the token, through the real
+    /// resolve path.
+    function mateForcedOn(address owner) internal {
+        forcedMate(true);
         assertEq(whiteTeam(), tokenTeam(), "the token's team is White in game 0");
-        white(1e18, owner);
+        black(1e18, owner);
         next(12);
-        black(1e18, address(0)); // plays White's move first
+        white(1e18, address(0)); // plays Black's move first
     }
 
     function tokenTeam() internal view returns (uint256) {
         return pool.currency0 == token ? 0 : 1;
     }
 
-    /// The token's team captures a queen with check (3% of its chest) for `owner`.
-    function tokenTeamTakesQueenFor(address owner) internal {
-        bool blackMoves = tokenTeam() != whiteTeam();
-        uint256 b;
-        b = put(b, "e1", 6);
-        b = put(b, "e8", 14);
-        b = put(b, "a1", blackMoves ? 5 : 4);
-        b = put(b, "a8", blackMoves ? 12 : 13);
-        hook.setPosition(id, b, side("e1"), side("e8"), blackMoves ? 1 : 0, 0);
-        hook.applyMove(pool, blackMoves ? mv("a8", "a1") : mv("a1", "a8"), owner, 1e30);
+    /// The token's team gets mated through the harness: a quarter of its chest is recorded for `owner` in the token.
+    function tokenTeamMatedFor(address owner) internal {
+        mateAgainst(tokenTeam(), owner, 1e30);
     }
 
     function finalizeWithATinyTrade() internal {
@@ -220,8 +208,9 @@ contract HostileTest is Base {
         assertEq(g.moveOwner, address(0xA));
     }
 
-    /// If the fallback fails too (an engine bug), trading goes on and the turn stays queued, unplayed and unpaid.
-    function test_aDeadEngineLeavesTheTurnQueuedAndTradingGoesOn() public {
+    /// If the fallback fails too (an engine bug), the game ends as a draw (reason 6) and a new one starts, so the
+    /// pool never freezes: nothing is played or paid, the bid is cleared, and trading goes on (audit 2026-10-31).
+    function test_aDeadEngineEndsTheGameAsADrawAndTradingGoesOn() public {
         deployMintAndApprove2Currencies();
         deployHook(config(new DeadEngine(), currency0));
         (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
@@ -229,11 +218,18 @@ contract HostileTest is Base {
         white(1e18, address(0xA));
         vm.recordLogs();
         playTurn();
-        assertEq(count(vm.getRecordedLogs(), FAILED), 1);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(count(logs, FAILED), 1);
+        assertEq(count(logs, OVER), 1, "the game ended");
+        uint256 reason;
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].topics[0] == keccak256("DrawTriggered(bytes32,uint32,uint8,uint16)")) (, reason,) = abi.decode(logs[i].data, (uint32, uint8, uint16));
+        }
+        assertEq(reason, 6, "a draw by engine failure");
         IMDuelHook.Game memory g = st();
+        assertEq(g.gameNo, 1, "a new game");
         assertEq(g.ply, 0, "nothing played");
-        assertTrue(bid().open, "still queued");
-        assertEq(bid().owner, address(0xA));
+        assertEq(hook.owed(address(0xA), currency0.toId()) + hook.owed(address(0xA), currency1.toId()), 0, "nothing paid");
         next(12);
         trade(1 - whiteTeam(), 1e18, address(0)); // and the next trade goes through as well
     }
@@ -245,11 +241,11 @@ contract HostileTest is Base {
         pairWith(t);
         hook.fundChest(pool, tokenTeam() == 1, 100e18);
         t.block_(address(0xB0B));
-        tokenTeamTakesQueenFor(address(0xB0B)); // played and paid: the token refuses 0xB0B
+        tokenTeamMatedFor(address(0xB0B)); // played and paid: the token refuses 0xB0B
         finalizeWithATinyTrade();
-        assertEq(hook.owed(address(0xB0B), token.toId()), 3e18, "kept owed");
-        assertEq(hook.chest(id, tokenTeam()), 97e18);
-        assertEq(claims(token), hook.chest(id, tokenTeam()) + 3e18 + hook.pile(token.toId()));
+        assertEq(hook.owed(address(0xB0B), token.toId()), 25e18, "kept owed");
+        assertEq(hook.chest(id, tokenTeam()), 75e18);
+        assertEq(claims(token), hook.chest(id, tokenTeam()) + 25e18 + hook.pile(token.toId()));
         trade(tokenTeam(), 1e18, address(0)); // and trading goes on
     }
 
@@ -290,10 +286,10 @@ contract HostileTest is Base {
         ReenterToken t = new ReenterToken();
         pairWith(t);
         hook.fundChest(pool, tokenTeam() == 1, 100e18);
-        tokenTeamTakesQueenFor(address(0xCAFE));
+        tokenTeamMatedFor(address(0xCAFE));
         finalizeWithATinyTrade();
-        assertEq(hook.owed(address(0xCAFE), token.toId()), 3e18, "recorded");
-        tokenTeamTakesQueenFor(address(0xB0B));
+        assertEq(hook.owed(address(0xCAFE), token.toId()), 25e18, "recorded");
+        tokenTeamMatedFor(address(0xB0B));
         finalizeWithATinyTrade();
         uint256 bob = hook.owed(address(0xB0B), token.toId());
         assertGt(bob, 0);
@@ -301,10 +297,10 @@ contract HostileTest is Base {
         vm.expectRevert();
         hook.withdraw(address(0xB0B), token); // the callback's nested unlock fails, so the whole claim does
         assertEq(hook.owed(address(0xB0B), token.toId()), bob, "nothing lost");
-        assertEq(hook.owed(address(0xCAFE), token.toId()), 3e18, "nothing moved");
+        assertEq(hook.owed(address(0xCAFE), token.toId()), 25e18, "nothing moved");
         t.arm(address(0), address(0), "");
         hook.withdraw(address(0xB0B), token);
-        assertEq(t.balanceOf(address(0xB0B)), bob, "claimed once the token behaves");
+        assertEq(t.balanceOf(address(0xB0B)), bob - 1, "claimed once the token behaves, but for the 1 wei kept owed");
     }
 
     // ---------------------------------------------------------------- hostile move owners (jobs f7f2a606 and 885d5cb6)
@@ -329,11 +325,13 @@ contract HostileTest is Base {
         if (token.isAddressZero()) hook.fundChest{value: 10 ether}(pool, false, 10 ether);
         else hook.fundChest(pool, tokenTeam() == 1, 10e18);
         vm.recordLogs();
-        queenForcedOn(address(r)); // the trade that plays the move: it must not revert
-        assertEq(st().ply, 1, "the move is played");
-        uint256 bounty = reward(vm.getRecordedLogs());
-        assertGe(bounty, 10e18 * 270 / 10_000, "a queen's bounty from the chest");
-        assertEq(hook.owed(address(r), token.toId()), bounty, "the reward is recorded, never pushed");
+        mateForcedOn(address(r)); // the trade that plays the move: it must not revert
+        assertEq(st().ply, 0, "the move is played and the mate starts a new game");
+        assertEq(st().gameNo, 1);
+        uint256 prize = paid(vm.getRecordedLogs());
+        // the bid's size is what the pool received, net of the hook fee taken on that side
+        assertApproxEqAbs(prize, 2e18, 2e16, "a quarter of the chest, capped at twice the 1-unit bid");
+        assertEq(hook.owed(address(r), token.toId()), prize, "the reward is recorded, never pushed");
         assertEq(manager.getNonzeroDeltaCount(), 0);
         next(12);
         trade(tokenTeam(), 1e18, address(0)); // and trading goes on, both ways
@@ -349,23 +347,25 @@ contract HostileTest is Base {
         pairEth();
         hook.fundChest{value: 10 ether}(pool, false, 10 ether);
         NoReceive r = new NoReceive();
-        queenForcedOn(address(r));
-        uint256 bounty = 10 ether * 270 / 10_000;
-        assertEq(hook.owed(address(r), 0), bounty, "owed: it takes no ETH");
+        mateForcedOn(address(r));
+        uint256 prize = hook.owed(address(r), 0);
+        assertApproxEqAbs(prize, 2 ether, 2e16, "owed: a quarter of the 10 ETH chest, capped at twice the 1-unit bid; it takes no ETH");
         vm.expectRevert();
         hook.withdraw(address(r), CurrencyLibrary.ADDRESS_ZERO);
         hook.withdrawTo(CurrencyLibrary.ADDRESS_ZERO, address(0xB0B)); // nobody else's call moves it
-        assertEq(hook.owed(address(r), 0), bounty);
+        assertEq(hook.owed(address(r), 0), prize);
         r.call(address(hook), abi.encodeCall(IMDuelHook.withdrawTo, (CurrencyLibrary.ADDRESS_ZERO, address(0xB0B))));
-        assertEq(address(0xB0B).balance, bounty, "sent where the owner said");
-        assertEq(hook.owed(address(r), 0), 0);
-        assertSolvent(nobody());
+        assertEq(address(0xB0B).balance, prize - 1, "sent where the owner said, but for the 1 wei kept owed");
+        assertEq(hook.owed(address(r), 0), 1);
+        address[] memory who = new address[](1);
+        who[0] = address(r);
+        assertSolvent(who);
     }
 
-    /// The one Reward in `logs`: its amount.
-    function reward(Vm.Log[] memory logs) internal pure returns (uint256 amount) {
+    /// The one MatePaid in `logs`: its amount.
+    function paid(Vm.Log[] memory logs) internal pure returns (uint256 amount) {
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics[0] == REWARD) (,,,, amount) = abi.decode(logs[i].data, (uint32, uint16, address, address, uint256));
+            if (logs[i].topics[0] == MATE_PAID) (,,, amount) = abi.decode(logs[i].data, (uint32, address, address, uint256));
         }
     }
 

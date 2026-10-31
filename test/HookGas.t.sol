@@ -7,6 +7,8 @@ import {Rules} from "../src/Rules.sol";
 import {IMDuelHook} from "../src/IMDuelHook.sol";
 import {Base} from "./Base.sol";
 import {HookConfig} from "./Harness.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 /// Plays the move scripted for each board at almost no cost, so a moving trade's gas is the hook's and the rules'
 /// own share.
@@ -34,7 +36,9 @@ contract ScriptedEngine is IChessEngine {
 contract HookGasTest is Base {
     uint256 constant PLAIN_BUDGET = 200_000;
     uint256 constant BID_BUDGET = 230_000;
-    uint256 constant MOVING_BUDGET = 560_000; // the trade that plays a turn, from a fresh pool jumped to a position
+    // the trade that plays a turn, from a fresh pool jumped to a position, the move a new player's first: three first
+    // writes of the game plus the player's two stat words and the player list (2026-10-31; was 560k before the stats)
+    uint256 constant MOVING_BUDGET = 620_000;
     uint256 constant RUNNING_BUDGET = 480_000; // its average in a running game
     uint256 constant CONVERSION_BUDGET = 350_000;
 
@@ -49,6 +53,16 @@ contract HookGasTest is Base {
         deployHook(c);
         (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
         addLiquidity(pool);
+        fundPots();
+    }
+
+    /// Pots of 1e22 a side, so the 1e20 bids below are a 1% share: 30% strength, as the budgets were set (an empty
+    /// pot would play every bid at 90%, which costs the engine more).
+    function fundPots() internal {
+        MockERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+        MockERC20(Currency.unwrap(currency1)).approve(address(hook), type(uint256).max);
+        hook.fundChest(pool, false, 1e22);
+        hook.fundChest(pool, true, 1e22);
     }
 
     function gasOf(uint256 team, uint256 amount, address owner) internal returns (uint256 used) {
@@ -90,8 +104,9 @@ contract HookGasTest is Base {
         assertLt(playing, MOVING_BUDGET, "playing trade budget");
     }
 
-    /// The trade that plays a move in a running game, on average: a real v5 game, one trade per block, each 1e20 into
-    /// 1e24 of depth (a 0.01% share: 30% strength; full strength, 1% and more, costs more), from half-move 20 (the last-move slot and the repetition ring already hold values, as in any game under way;
+    /// The trade that plays a move in a running game, on average: a real v5 game, one trade per block, each 1e20
+    /// against pots of 1e22 (a 1% share: 30% strength; full strength, the whole pot and more, costs more), from
+    /// half-move 20 (the last-move slot and the repetition ring already hold values, as in any game under way;
     /// test_middlegameGas jumps a fresh pool to a position and pays two first writes a live game never does).
     function test_runningGameGas() public {
         open(NEVER);
@@ -119,6 +134,7 @@ contract HookGasTest is Base {
         deployHook(config(IChessEngine(address(e)), currency0));
         (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
         addLiquidity(pool);
+        fundPots();
         uint256[] memory moves = gameMoves(3);
         uint256 total;
         uint256 max;

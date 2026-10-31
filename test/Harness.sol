@@ -20,7 +20,7 @@ struct HookConfig {
     uint256 turnBlocks;
 }
 
-/// Test-only: sets up exact positions and applies a chosen move, to test rewards and how games end.
+/// Test-only: sets up exact positions and applies a chosen move, to test mates, counts and how games end.
 contract IMDuelHarness is IMDuelHook {
     using PoolIdLibrary for PoolKey;
 
@@ -28,48 +28,46 @@ contract IMDuelHarness is IMDuelHook {
         IMDuelHook(c.manager, c.engine, c.imd, c.minImd, c.minImduel, c.turnBlocks)
     {}
 
-    /// Suites written before the opening surcharge trade right after the main duel opens and expect the plain fee;
-    /// the surcharge's own tests and the invariant suites switch it on (the real hook always has it).
-    bool public opening;
-
-    function setOpening(bool on) external {
-        opening = on;
-    }
-
-    function _chestBps(Game storage g) internal view override returns (uint256) {
-        return opening ? super._chestBps(g) : CHEST_BPS;
-    }
-
     function setPosition(PoolId id, uint256 board, uint32 white, uint32 black, uint16 ply, uint16 quiet) external {
         Game storage g = games[id];
         (g.board, g.whiteState, g.blackState, g.ply, g.quiet) = (board, white, black, ply, quiet);
     }
 
-    /// Plays `move` as if a turn owned by `owner` resolved to it: recorded, and its bounty paid at once (capped at
-    /// `cap`), inside an unlock as the next block's trade does.
-    function applyMove(PoolKey calldata key, uint16 move, address owner, uint256 cap) external {
-        manager.unlock(abi.encode(uint8(9), abi.encode(key, move, owner, cap)));
+    /// Plays `move` as if a turn owned by `owner`, whose trade paid `paid`, resolved to it: recorded, and a mate paid
+    /// at once, inside an unlock as the next block's trade does.
+    function applyMove(PoolKey calldata key, uint16 move, address owner, uint256 paid) external {
+        manager.unlock(abi.encode(uint8(9), abi.encode(key, move, owner, paid)));
     }
 
     function unlockCallback(bytes calldata data) public override returns (bytes memory) {
         (uint8 action, bytes memory body) = abi.decode(data, (uint8, bytes));
         if (action != 9) return super.unlockCallback(data);
         _onlyManager();
-        (PoolKey memory key, uint16 move, address owner, uint256 cap) = abi.decode(body, (PoolKey, uint16, address, uint256));
-        this.applyAndPay(key, move, owner, cap);
+        (PoolKey memory key, uint16 move, address owner, uint256 paid) = abi.decode(body, (PoolKey, uint16, address, uint256));
+        this.applyAndPay(key, move, owner, paid);
         return "";
     }
 
-    function applyAndPay(PoolKey calldata key, uint16 move, address owner, uint256 cap) external {
+    function applyAndPay(PoolKey calldata key, uint16 move, address owner, uint256 paid) external {
         require(msg.sender == address(this));
         PoolId id = key.toId();
         Game storage g = games[id];
         bool black = g.ply & 1 == 1;
         (uint32 mover, uint32 other) = black ? (g.blackState, g.whiteState) : (g.whiteState, g.blackState);
-        Trade memory t = Trade(1e18, cap, owner, 10_000);
+        Trade memory t = Trade(paid, owner, 9_000);
         uint256 team = teamOf(g.slice, g.gameNo, black);
-        _apply(id, g, move, Rules.move(g.board, mover, other, black, move), t);
-        _payBounty(id, key, g, team, t);
+        _apply(id, g, move, Rules.move(g.board, mover, other, black, move), t, team);
+        if (g.moveResult == (black ? 2 : 1)) _payMate(id, key, g, t, team);
+    }
+
+    /// Sets what the current game's trading put into each pot (the mate's inflow cap), as if it had been traded.
+    function setGameIn(PoolId id, uint256 in0, uint256 in1) external {
+        gameIn[id] = (uint256(games[id].gameNo) << 224) | (in1 << 112) | in0;
+    }
+
+    /// `_add`, for the saturation tests.
+    function add(uint256 w, uint256 shift, uint256 bits, uint256 by) external pure returns (uint256) {
+        return _add(w, shift, bits, by);
     }
 
     /// The position key held for half-move `ply`.

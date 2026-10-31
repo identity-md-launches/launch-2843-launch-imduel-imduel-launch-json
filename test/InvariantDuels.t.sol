@@ -367,7 +367,6 @@ contract InvariantDuelsTest is Base {
         HookConfig memory c = config(v5(), imdC);
         (c.minImd, c.minImduel) = (imdMinimum(), 1e15);
         deployHook(c);
-        hook.setOpening(true); // the opening surcharge as the real hook has it: pools open now, trades follow
         keys.push(open(imdC, duelC, IHooks(address(hook)), 1e20)); // the main duel, first on the hook, thin as at launch
         keys.push(open(xC, imdC, IHooks(address(hook)), 1e24));
         keys.push(open(CurrencyLibrary.ADDRESS_ZERO, imdC, IHooks(address(hook)), 1e24)); // an ETH duel: its slice in IMD
@@ -453,7 +452,7 @@ contract InvariantDuelsTest is Base {
             need(g.closeBlock < block.number + hook.turnBlocks(), "GL-05 a window ends at most turnBlocks ahead");
             for (uint256 t; t < 2; t++) {
                 IMDuelHook.TopBid memory b = g.bids[t];
-                if (b.owner == address(0)) need(b.size == 0 && b.cap == 0 && b.strength == 0, "GL-05 a move for nobody is empty");
+                if (b.owner == address(0)) need(b.size == 0 && b.strength == 0, "GL-05 a move for nobody is empty");
                 need(b.strength <= 9_000, "GL-05 strength at most 90%");
             }
             need(g.moveStrength <= 9_000, "GL-05 strength at most 90%");
