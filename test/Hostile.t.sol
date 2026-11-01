@@ -110,7 +110,9 @@ contract HostileTest is Base {
         q.approve(address(swapRouter), type(uint256).max);
         q.approve(address(modifyLiquidityRouter), type(uint256).max);
         vm.deal(address(this), 1e30);
-        (pool, id) = initPool(CurrencyLibrary.ADDRESS_ZERO, Currency.wrap(address(q)), IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
+        (pool, id) = initPool(
+            CurrencyLibrary.ADDRESS_ZERO, Currency.wrap(address(q)), IHooks(address(hook)), 3000, SQRT_PRICE_1_1
+        );
         modifyLiquidityRouter.modifyLiquidity{value: 1e27}(pool, ModifyLiquidityParams(-887220, 887220, 1e24, 0), "");
         token = CurrencyLibrary.ADDRESS_ZERO;
     }
@@ -150,11 +152,20 @@ contract HostileTest is Base {
         setUpMainDuel();
         white(1e18, address(0xA)); // a turn to play
         next(12);
-        bytes memory call = abi.encodeCall(PoolSwapTest.swap, (pool, SwapParams(toMove() == 1, -1e18,
-            toMove() == 1 ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT), PoolSwapTest.TestSettings(false, false), bytes("")));
+        bytes memory call = abi.encodeCall(
+            PoolSwapTest.swap,
+            (
+                pool,
+                SwapParams(toMove() == 1, -1e18, toMove() == 1 ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT),
+                PoolSwapTest.TestSettings(false, false),
+                bytes("")
+            )
+        );
         uint256 played;
         uint256 reverted;
-        for (uint256 g = 200_000; g <= 900_000; g += 10_000) {
+        // Resolution now reserves the complete engine cap before calling it (imported audit gas finding).
+        // Sweep through that admission threshold as well as budgets that only cover an open-window bid.
+        for (uint256 g = 200_000; g <= 4_000_000; g += 50_000) {
             uint256 snap = vm.snapshotState();
             vm.recordLogs();
             (bool ok,) = address(swapRouter).call{gas: g}(call);
@@ -180,8 +191,15 @@ contract HostileTest is Base {
         addLiquidity(pool);
         white(1e18, address(0xA));
         next(12);
-        bytes memory call = abi.encodeCall(PoolSwapTest.swap, (pool, SwapParams(whiteTeam() == 0, -1e17,
-            whiteTeam() == 0 ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT), PoolSwapTest.TestSettings(false, false), bytes("")));
+        bytes memory call = abi.encodeCall(
+            PoolSwapTest.swap,
+            (
+                pool,
+                SwapParams(whiteTeam() == 0, -1e17, whiteTeam() == 0 ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT),
+                PoolSwapTest.TestSettings(false, false),
+                bytes("")
+            )
+        );
         (bool ok, bytes memory err) = address(swapRouter).call{gas: 1_500_000}(call);
         assertFalse(ok, "a normal gas limit reverts");
         assertTrue(err.length > 0);
@@ -223,13 +241,17 @@ contract HostileTest is Base {
         assertEq(count(logs, OVER), 1, "the game ended");
         uint256 reason;
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics[0] == keccak256("DrawTriggered(bytes32,uint32,uint8,uint16)")) (, reason,) = abi.decode(logs[i].data, (uint32, uint8, uint16));
+            if (logs[i].topics[0] == keccak256("DrawTriggered(bytes32,uint32,uint8,uint16)")) {
+                (, reason,) = abi.decode(logs[i].data, (uint32, uint8, uint16));
+            }
         }
         assertEq(reason, 6, "a draw by engine failure");
         IMDuelHook.Game memory g = st();
         assertEq(g.gameNo, 1, "a new game");
         assertEq(g.ply, 0, "nothing played");
-        assertEq(hook.owed(address(0xA), currency0.toId()) + hook.owed(address(0xA), currency1.toId()), 0, "nothing paid");
+        assertEq(
+            hook.owed(address(0xA), currency0.toId()) + hook.owed(address(0xA), currency1.toId()), 0, "nothing paid"
+        );
         next(12);
         trade(1 - whiteTeam(), 1e18, address(0)); // and the next trade goes through as well
     }
@@ -349,7 +371,9 @@ contract HostileTest is Base {
         NoReceive r = new NoReceive();
         mateForcedOn(address(r));
         uint256 prize = hook.owed(address(r), 0);
-        assertApproxEqAbs(prize, 2 ether, 2e16, "owed: a quarter of the 10 ETH chest, capped at twice the 1-unit bid; it takes no ETH");
+        assertApproxEqAbs(
+            prize, 2 ether, 2e16, "owed: a quarter of the 10 ETH chest, capped at twice the 1-unit bid; it takes no ETH"
+        );
         vm.expectRevert();
         hook.withdraw(address(r), CurrencyLibrary.ADDRESS_ZERO);
         hook.withdrawTo(CurrencyLibrary.ADDRESS_ZERO, address(0xB0B)); // nobody else's call moves it
@@ -365,7 +389,9 @@ contract HostileTest is Base {
     /// The one MatePaid in `logs`: its amount.
     function paid(Vm.Log[] memory logs) internal pure returns (uint256 amount) {
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics[0] == MATE_PAID) (,,, amount) = abi.decode(logs[i].data, (uint32, address, address, uint256));
+            if (logs[i].topics[0] == MATE_PAID) {
+                (,,, amount) = abi.decode(logs[i].data, (uint32, address, address, uint256));
+            }
         }
     }
 

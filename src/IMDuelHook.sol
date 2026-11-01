@@ -62,6 +62,9 @@ contract IMDuelHook is IUnlockCallback {
     // position can cost: a trade with less gas than the cap needs reverts (NotEnoughGas), one with more gets the fallback
     uint256 internal constant ENGINE_GAS = 3_000_000;
     uint256 internal constant FALLBACK_GAS = 2_000_000;
+    // Reserve gas before calling the engine: recording the move, stats, payout and next bid must still fit,
+    // and an underfunded call must report NotEnoughGas instead of losing that error to the 63/64 rule.
+    uint256 internal constant ENGINE_RETURN_GAS = 300_000;
     // EIP-2935: the last 8,191 block hashes (about a day), beyond the 256 the BLOCKHASH opcode serves
     address internal constant HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
 
@@ -197,7 +200,7 @@ contract IMDuelHook is IUnlockCallback {
     /// The callbacks this hook uses, which its address carries (v4's BaseHook convention: the IMD launch reads it).
     function getHookPermissions() public pure returns (Hooks.Permissions memory p) {
         (p.afterInitialize, p.beforeSwap, p.afterSwap, p.beforeSwapReturnDelta, p.afterSwapReturnDelta) =
-            (true, true, true, true, true);
+        (true, true, true, true, true);
     }
 
     function game(PoolId id) external view returns (Game memory) {
@@ -277,10 +280,13 @@ contract IMDuelHook is IUnlockCallback {
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(taken, 0), 0);
     }
 
-    function afterSwap(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata hookData)
-        external
-        returns (bytes4, int128)
-    {
+    function afterSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) external returns (bytes4, int128) {
         _onlyManager();
         PoolId id = key.toId();
         Game storage g = games[id];
@@ -288,7 +294,9 @@ contract IMDuelHook is IUnlockCallback {
         uint256 specIdx = _specified(params);
         // the whole order, less the fee taken before the swap, must have traded: that fee counted all of it, so a trade
         // its price limit stopped early would pay it on what never traded
-        if (int256(specIdx == 0 ? delta.amount0() : delta.amount1()) != params.amountSpecified + taken) revert PartialFill();
+        if (int256(specIdx == 0 ? delta.amount0() : delta.amount1()) != params.amountSpecified + taken) {
+            revert PartialFill();
+        }
         uint256 unspecIdx = 1 - specIdx;
         int128 fee = _takeFee(id, key, unspecIdx, _abs(unspecIdx == 0 ? delta.amount0() : delta.amount1()), g);
         (int128 hook0, int128 hook1) = specIdx == 0 ? (taken, fee) : (fee, taken);
@@ -408,7 +416,8 @@ contract IMDuelHook is IUnlockCallback {
             paid = manager.settle{value: amount}();
         } else {
             // the return value is not read (some tokens return nothing): settle() credits what actually arrived
-            (bool ok,) = Currency.unwrap(c).call(abi.encodeCall(IERC20Min.transferFrom, (who, address(manager), amount)));
+            (bool ok,) =
+                Currency.unwrap(c).call(abi.encodeCall(IERC20Min.transferFrom, (who, address(manager), amount)));
             if (!ok) revert BadValue();
             paid = manager.settle();
         }
@@ -422,9 +431,14 @@ contract IMDuelHook is IUnlockCallback {
     /// next move (the move being bid for now, if its team is to move) and takes the top spot if it pays more than
     /// RAISE_PCT over the current top; a trade of the other team after TURN_TIMEOUT of silence opens the silent side's
     /// move at 0%.
-    function _play(PoolId id, PoolKey calldata key, Game storage g, bool zeroForOne, BalanceDelta delta,
-        bytes calldata hookData) internal
-    {
+    function _play(
+        PoolId id,
+        PoolKey calldata key,
+        Game storage g,
+        bool zeroForOne,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) internal {
         uint256 mover = teamOf(g.base, g.gameNo, g.ply & 1 == 1);
         if (g.bids[mover].open && block.number > g.closeBlock) {
             _resolve(id, key, g, mover);
@@ -432,9 +446,8 @@ contract IMDuelHook is IUnlockCallback {
         }
         uint256 team = zeroForOne ? 1 : 0; // the token bought
         TopBid storage b = g.bids[team];
-        (uint256 paid, uint256 got) = team == 1
-            ? (_abs(delta.amount0()), _abs(delta.amount1()))
-            : (_abs(delta.amount1()), _abs(delta.amount0()));
+        (uint256 paid, uint256 got) =
+            team == 1 ? (_abs(delta.amount0()), _abs(delta.amount1())) : (_abs(delta.amount1()), _abs(delta.amount0()));
         if (team == mover) {
             if (_beats(paid, b)) {
                 // the move's first bid in its window's last block or after it (the window passed without a bid, else
@@ -469,9 +482,14 @@ contract IMDuelHook is IUnlockCallback {
     /// that signed the transaction, so a trade through any router or aggregator earns. Known and accepted: a trade
     /// relayed for a smart-contract wallet without hookData credits the relayer.
     function _owner(bytes calldata hookData) internal view returns (address owner) {
-        if (hookData.length == 20) owner = address(bytes20(hookData));
-        else if (hookData.length == 32 && uint256(bytes32(hookData)) <= type(uint160).max) owner = address(uint160(uint256(bytes32(hookData))));
-        if (owner == address(0) || owner == address(this) || owner == address(manager) || owner == DEAD) owner = tx.origin;
+        if (hookData.length == 20) {
+            owner = address(bytes20(hookData));
+        } else if (hookData.length == 32 && uint256(bytes32(hookData)) <= type(uint160).max) {
+            owner = address(uint160(uint256(bytes32(hookData))));
+        }
+        if (owner == address(0) || owner == address(this) || owner == address(manager) || owner == DEAD) {
+            owner = tx.origin;
+        }
     }
 
     /// Whether a trade that paid `paid` takes the top spot from bid `b`: there is none, or it pays more than RAISE_PCT over it.
@@ -523,8 +541,13 @@ contract IMDuelHook is IUnlockCallback {
         uint256 seed = uint256(keccak256(abi.encode(h, id, g.gameNo, g.ply, t.owner, t.size)));
         bool black = g.ply & 1 == 1;
         (uint32 own, uint32 other) = black ? (g.blackState, g.whiteState) : (g.whiteState, g.blackState);
-        (ok, m, r) = _engine(ENGINE_GAS, abi.encodeCall(IChessEngine.play,
-            (g.board, own, other, black, uint256(t.strength), seed, _history(id, g.ply, g.quiet), g.gameNo, g.quiet)));
+        (ok, m, r) = _engine(
+            ENGINE_GAS,
+            abi.encodeCall(
+                IChessEngine.play,
+                (g.board, own, other, black, uint256(t.strength), seed, _history(id, g.ply, g.quiet), g.gameNo, g.quiet)
+            )
+        );
         if (ok) return (ok, false, m, r);
         _enoughGas(ENGINE_GAS);
         (ok, m, r) = _engine(FALLBACK_GAS, abi.encodeCall(IChessEngine.playAny, (g.board, own, other, black, seed)));
@@ -572,6 +595,7 @@ contract IMDuelHook is IUnlockCallback {
 
     /// Calls the engine with a gas cap; ok only for a well-formed answer.
     function _engine(uint256 gasCap, bytes memory data) internal view returns (bool, uint16, Rules.Played memory r) {
+        if (gasleft() < gasCap + gasCap / 63 + ENGINE_RETURN_GAS) revert NotEnoughGas();
         (bool ok, bytes memory result) = address(engine).staticcall{gas: gasCap}(data);
         if (!ok || result.length != 224) return (false, 0, r);
         uint16 m;
@@ -584,7 +608,9 @@ contract IMDuelHook is IUnlockCallback {
     function _history(PoolId id, uint16 ply, uint16 quiet) internal view returns (uint64[8] memory previous) {
         if (quiet < 3) return previous;
         (uint256 lo, uint256 hi) = _lanes(id, ply);
-        for (uint256 i; i < 8; i++) previous[i] = _key(lo, hi, ((ply + 14 - i * 2) % 16) >> 1);
+        for (uint256 i; i < 8; i++) {
+            previous[i] = _key(lo, hi, ((ply + 14 - i * 2) % 16) >> 1);
+        }
     }
 
     /// Records a move played by the rules (`r`: the new position and how the game stands), clears its bid and opens
@@ -626,7 +652,9 @@ contract IMDuelHook is IUnlockCallback {
         // the main duel only: a side duel costs its creator nothing and its empty pots play at the cap, so its counts
         // could be farmed for gas (audit 2026-10-31). Every trade bids, and every move it plays counts (user, 2026-11-02:
         // a move of yours always counts; farming one costs the move's gas, ~330k)
-        if (t.owner != address(0) && g.main) _count(id, g, t, move, board, piece, captured, r.check, result == (black ? 2 : 1));
+        if (t.owner != address(0) && g.main) {
+            _count(id, g, t, move, board, piece, captured, r.check, result == (black ? 2 : 1));
+        }
         if (result != 0) {
             g.moveResult = result;
             emit GameOver(id, g.gameNo, result, g.ply);
@@ -664,9 +692,17 @@ contract IMDuelHook is IUnlockCallback {
     // ---------------------------------------------------------------- player counts (badges and display only)
 
     /// Adds a played move to its owner's counts (the first one also lists the owner in players).
-    function _count(PoolId id, Game storage g, Trade memory t, uint16 move, uint256 board, uint8 piece, uint8 captured,
-        bool check, bool mate) internal
-    {
+    function _count(
+        PoolId id,
+        Game storage g,
+        Trade memory t,
+        uint16 move,
+        uint256 board,
+        uint8 piece,
+        uint8 captured,
+        bool check,
+        bool mate
+    ) internal {
         uint256[2] storage w = counts[t.owner];
         (uint256 a, uint256 b) = (w[0], w[1]);
         if (a == 0 && b == 0) players.push(t.owner);
@@ -732,8 +768,10 @@ contract IMDuelHook is IUnlockCallback {
         if (g.quiet < 4) return false;
         uint64 k = Chess.positionKey(g.board, g.whiteState, g.blackState, g.ply & 1 == 1, g.gameNo);
         uint256 seen;
-        if (g.board == Chess.START_BOARD && g.whiteState == Chess.START_WHITE && g.blackState == Chess.START_BLACK
-            && g.ply & 1 == 0) seen = 1;
+        if (
+            g.board == Chess.START_BOARD && g.whiteState == Chess.START_WHITE && g.blackState == Chess.START_BLACK
+                && g.ply & 1 == 0
+        ) seen = 1;
         // the key's side to move is g.ply's; those positions were made by half-moves of the other parity
         (uint256 lo, uint256 hi) = _lanes(id, g.ply + 1);
         for (uint256 i; i < 8; i++) {
