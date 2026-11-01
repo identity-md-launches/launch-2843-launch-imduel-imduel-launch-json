@@ -21,6 +21,9 @@ contract LaunchFilesTest is Base {
     function check(string memory file) internal {
         string memory json = vm.readFile(file);
         assertEq(vm.parseJsonStringArray(json, ".hook.constructorArgs").length, 4, "constructor arguments");
+        // the published worker refuses a manifest whose notes pass 4,000 characters (worker v0.1.9); the export fills
+        // the engine's address (42 characters) in for ENGINE_ADDRESS (14)
+        assertLe(bytes(vm.parseJsonString(json, ".notes")).length + 28, 4_000, "the worker's limit on the notes");
         IChessEngine engine = v5();
         bytes memory args = LaunchPolicy.hookArgs(vm, json, address(manager), address(engine));
 
