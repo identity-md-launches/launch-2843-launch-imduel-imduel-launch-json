@@ -11,10 +11,8 @@ import {Base} from "./Base.sol";
 import {HookConfig} from "./Harness.sol";
 
 /// Wallets send a trade with the smallest gas limit that succeeds (eth_estimateGas). At that limit the trade must
-/// still do all its work: play the queued turn, record its mate's payout and convert a due slice batch, none of
-/// them silently skipped for lack of gas.
+/// still do all its work: play the queued turn and record its mate's payout, neither silently skipped for lack of gas.
 contract GasEstimateTest is Base {
-    bytes32 constant CONVERTED = keccak256("Converted(address,uint256,uint256,uint256)");
 
     /// The smallest gas limit at which `data` sent to the router succeeds (binary search from the same state), then
     /// sends it with that limit for real and returns its logs.
@@ -94,20 +92,5 @@ contract GasEstimateTest is Base {
             vm.revertToState(snap);
         }
         assertGt(succeeded, 0, "the range reaches the estimate");
-    }
-
-    function test_atTheEstimateADueBatchConverts() public {
-        deployV4();
-        deployMintAndApprove2Currencies();
-        HookConfig memory c = config(v5(), currency0);
-        c.minImd = 1e15;
-        deployHook(c);
-        (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
-        addLiquidity(pool);
-        sampleBlocks(pool);
-        // pays 10 IMD (currency0): its 0.1% slice passes the 0.001 IMD minimum, so this trade converts a batch
-        (uint256 g, Vm.Log[] memory logs) = atMinimalGas(swapCall(1, 10e18));
-        emit log_named_uint("smallest gas limit that converts", g);
-        assertEq(count(logs, CONVERTED), 1, "the batch is not skipped");
     }
 }

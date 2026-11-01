@@ -65,6 +65,15 @@ contract BiddingTest is Base {
         assertEq(bid().owner, address(0xC));
     }
 
+    /// Exactly 10% more doesn't take the top spot; one wei more does.
+    function test_exactlyTenPercentMoreIsNotEnough() public {
+        white(10e18, address(0xA));
+        white(11e18, address(0xB));
+        assertEq(bid().owner, address(0xA), "11 against 10: not more than 10% more");
+        white(11e18 + 1, address(0xB));
+        assertEq(bid().owner, address(0xB));
+    }
+
     function test_bidsCountAcrossTheWholeWindow() public {
         white(1e18, address(0xA)); // the window's first block (the game opened in this one)
         next(12);
@@ -164,16 +173,16 @@ contract BiddingTest is Base {
         }
         assertEq(1 - whiteTeam(), 0, "currency0's team plays Black in game 0");
         uint256 own = hook.chest(id, 0);
-        black(1e18, address(0xB0B)); // pays 1 of currency1, the loser's token: the cap is 2
+        black(1e18, address(0xB0B)); // pays 1 of currency1, the loser's token, less the fee taken from it (0.425%)
         vm.roll(st().closeBlock + 1);
         white(1e17, address(0)); // plays Black's move
         assertEq(st().gameNo, 1, "mate");
-        assertEq(hook.owed(address(0xB0B), currency1.toId()), 2e18, "a quarter of the loser's chest, capped at twice the bid");
-        assertApproxEqAbs(hook.chest(id, 1), 98e18, 1e15, "from the loser's chest (plus the playing trade's own fee)");
+        assertEq(hook.owed(address(0xB0B), currency1.toId()), 2 * 0.99575e18, "a quarter of the loser's chest, capped at twice the bid");
+        assertApproxEqAbs(hook.chest(id, 1), 98e18, 2e16, "from the loser's chest (plus both trades' halves of the pot fee)");
         assertGe(hook.chest(id, 0), own, "the winner's chest pays nothing");
         uint256 before = MockERC20(Currency.unwrap(currency1)).balanceOf(address(0xB0B));
         hook.withdraw(address(0xB0B), currency1); // recorded for the owner, claimed by anyone for it
-        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(0xB0B)) - before, 2e18 - 1, "paid in the loser's token, 1 wei kept owed");
+        assertEq(MockERC20(Currency.unwrap(currency1)).balanceOf(address(0xB0B)) - before, 2 * 0.99575e18 - 1, "paid in the loser's token, 1 wei kept owed");
     }
 
     // ---------------------------------------------------------------- who a trade bids for

@@ -12,7 +12,7 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Base} from "./Base.sol";
 
 /// Any two tokens are two equal teams; native ETH works like any token; pools on one hook keep separate games and
-/// chests; each pool takes its slice in the side that converts most simply.
+/// chests; each pool's base side (IMD, else $IMDUEL) sets the colours and its slice is taken in $IMDUEL where it has it.
 contract TeamsTest is Base {
     using StateLibrary for IPoolManager;
 
@@ -21,8 +21,8 @@ contract TeamsTest is Base {
         deployMintAndApprove2Currencies();
     }
 
-    /// Every duel's slice buys $IMDUEL, so two tokens with no route to it (neither IMD, $IMDUEL nor routed ETH) can't
-    /// open a duel (swarm audit 2026-10-27, finding 4: their slice would have waited for good).
+    /// Every duel's slice goes to a main duel pot, so two tokens that are neither IMD nor $IMDUEL can't open a duel
+    /// (swarm audit 2026-10-27, finding 4).
     function test_twoPlainTokensCannotDuel() public {
         deployHookAside(v5());
         vm.expectRevert(); // NoRoute, wrapped by the pool manager
@@ -38,16 +38,19 @@ contract TeamsTest is Base {
         swapNativeInput(pool, false, -1e18, "", 0); // pays currency1, buys ETH: ETH's team is White in game 0
         assertTrue(bid().open, "it takes White's turn");
         assertEq(st().slice, 1, "currency1 stands in for $IMDUEL here");
+        assertEq(st().base, 1, "and is the base: ETH's team, the token bought, plays White first");
     }
 
     function test_sliceSide() public {
         deployHook(config(v5(), currency0)); // currency0 = IMD, currency1 = $IMDUEL
         (, PoolId main) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
-        assertEq(hook.game(main).slice, 0, "the main duel: in IMD");
+        assertEq(hook.game(main).slice, 1, "the main duel: in $IMDUEL");
+        assertEq(hook.game(main).base, 0, "its base: IMD, so $IMDUEL's team plays White first");
         (, PoolId eth) = initPool(CurrencyLibrary.ADDRESS_ZERO, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
         assertEq(hook.game(eth).slice, 1, "$IMDUEL before ETH");
         (, PoolId ethImd) = initPool(CurrencyLibrary.ADDRESS_ZERO, currency0, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
-        assertEq(hook.game(ethImd).slice, 1, "IMD before ETH");
+        assertEq(hook.game(ethImd).slice, 1, "no $IMDUEL: in IMD");
+        assertEq(hook.game(ethImd).base, 1);
     }
 
     /// Anyone may open a dynamic-fee pool with the hook. The hook never sets that fee, so the pool's LP fee stays 0;
@@ -75,8 +78,8 @@ contract TeamsTest is Base {
         swap(a, true, -1e18, ""); // buys currency1 ($IMDUEL): White's turn in game 0
         assertTrue(bidOf(ida).open);
         assertFalse(bidOf(idb).open, "the other pool's game is untouched");
-        assertGt(hook.chest(ida, 0), 0);
-        assertEq(hook.chest(idb, 0), 0, "and its chest");
+        assertGt(hook.chest(ida, 1), 0, "the bought token's pot");
+        assertEq(hook.chest(idb, 1), 0, "and its chest");
         swap(b, true, -1e18, "");
         assertTrue(bidOf(idb).open);
         next(12);

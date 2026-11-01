@@ -182,6 +182,56 @@ contract StatsTest is Base {
         assertEq(hook.playerCount(), 1);
     }
 
+    /// Every move a trade's bid plays counts, whatever its strength (user, 2026-11-02): a move of yours always counts.
+    function test_aMoveAtAnyStrengthCounts() public {
+        hook.setStrength(0);
+        hook.applyMove(pool, mv("e2", "e4"), A, 1e18);
+        assertEq(field(moves(A), 0, 20), 1, "a 0% move counts");
+        assertEq(hook.playerCount(), 1, "and lists its owner");
+    }
+
+    /// Through the real path: with pots of 100 tokens a side, a 100-wei buy still bids, plays at 0% and counts.
+    function test_aDustBidsMoveCounts() public {
+        hook.fundChest(pool, false, 100e18);
+        hook.fundChest(pool, true, 100e18);
+        white(100, A);
+        assertEq(bid().strength, 0, "a dust share of the pot");
+        assertEq(bid().owner, A, "it still bids");
+        playTurn();
+        assertEq(st().ply, 1, "the move was played");
+        assertEq(field(moves(A), 0, 120) > 0, true, "and counts");
+    }
+
+    /// A mate counts for its owner even when it paid nothing (a game nobody paid into); only what it won stays 0.
+    function test_aMateCountsEvenWhenItPaysNothing() public {
+        hook.fundChest(pool, false, 100e18);
+        hook.fundChest(pool, true, 100e18);
+        mateAgainstIn(1 - whiteTeam(), A, 1e30, 0, 0);
+        assertEq(st().gameNo, 1, "the game ended");
+        assertEq(field(rare(A), 0, 16), 1, "the mate counts");
+        assertEq(field(rare(A), 140, 40) + field(rare(A), 180, 40), 0, "nothing won");
+    }
+
+    /// A side duel counts nothing even when its mate pays: no moves, no mate, no amount won.
+    function test_aPaidSideDuelMateCountsNothing() public {
+        MockERC20 x = mockToken("X", "X");
+        x.mint(address(this), 1e30);
+        x.approve(address(hook), type(uint256).max);
+        Currency c = Currency.wrap(address(x));
+        (Currency a, Currency b) = c < currency0 ? (c, currency0) : (currency0, c);
+        (PoolKey memory sideKey, PoolId sideId) = initPool(a, b, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
+        hook.fundChest(sideKey, false, 100e18);
+        hook.fundChest(sideKey, true, 100e18);
+        (PoolKey memory mainKey, PoolId mainId) = (pool, id);
+        (pool, id) = (sideKey, sideId); // mateAgainst works on `pool`
+        uint256 loser = 1 - whiteTeam();
+        mateAgainst(loser, A, 1e30);
+        assertEq(hook.owed(A, (loser == 0 ? sideKey.currency0 : sideKey.currency1).toId()), 25e18, "the mate paid");
+        (uint256 m, uint256 r) = hook.stats(A);
+        assertEq(m + r, 0, "and counts nothing");
+        (pool, id) = (mainKey, mainId);
+    }
+
     /// A field stops at its maximum and never spills into its neighbours.
     function test_countersSaturate() public view {
         uint256 w = (7 << 220) | (4_090 << 232) | (9 << 244);

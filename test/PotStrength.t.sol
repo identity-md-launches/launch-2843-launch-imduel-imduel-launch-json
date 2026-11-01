@@ -87,12 +87,12 @@ contract PotStrengthTest is Base {
     /// from that output before the swap: the trader's own fee is part of its bid.
     function test_exactOutputStrengthIncludesThePotShare() public {
         hook.fundChest(pool, false, 2e21);
-        hook.fundChest(pool, true, 1e21); // pot 1 is worth less: the pot share is taken in currency1
+        hook.fundChest(pool, true, 1e21);
         assertEq(whiteTeam(), 1, "currency1's team is to move");
-        swap(pool, true, 1e19, abi.encodePacked(address(0xA))); // exact output of 1e19 currency1
+        swap(pool, true, 1e19, abi.encodePacked(address(0xA))); // exact output of 1e19 currency1: the fee in the output
         uint256 pot = hook.chest(id, 1);
-        assertEq(pot, 1e21 + 1e19 * 65 / 10_000, "the pot share came from the output");
-        assertEq(bid().strength, Strength.fromShare(1e19 + 1e19 * 65 / 10_000, pot), "measured on the output plus the share");
+        assertEq(pot, 1e21 + 1e19 * 65 / 20_000, "half the pot fee, from the output");
+        assertEq(bid().strength, Strength.fromShare(1e19 + 1e19 * 65 / 20_000 + 1e19 * 10 / 10_000, pot), "measured on the output plus the fee on it");
     }
 
     /// An empty pot plays at the cap, and the first fees make it a pot: dust then plays at 0.

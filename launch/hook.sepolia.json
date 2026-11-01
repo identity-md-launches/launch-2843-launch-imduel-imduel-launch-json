@@ -6,8 +6,6 @@
       "$poolManager",
       "ENGINE_ADDRESS",
       "0x0000000000000000000000000000000000000000",
-      "10000000000000000",
-      "1000000000000000000000000",
       "3"
     ],
     "permissions": [
@@ -32,5 +30,5 @@
     "tickSpacing": 60,
     "initialPrice": "79228162514264337593543950336"
   },
-  "notes": "Sepolia (11155111) rehearsal of launch/hook.json: hook launches there pair with ETH only, so the pair currency (the constructor's imd) is native ETH and there is no ETH route in the hook. The main duel is $IMDUEL / ETH; the ETH protocol slice converts into $IMDUEL in the main duel itself once 0.01 ETH has piled up. ENGINE_ADDRESS is the ChessEngineV5 address from the Sepolia engine launch (launch/engine.json). Everything else as in launch/hook.json. turnBlocks 3, as on Ethereum (12-second blocks on both)."
+  "notes": "Sepolia (11155111) rehearsal of launch/hook.json: hook launches there pair with ETH only, so the pair currency (the constructor's imd) is native ETH: ETH plays IMD's part (the main duel's base, and the slice of any ETH duel goes to its ETH pot). The main duel is $IMDUEL / ETH; its slice is taken in $IMDUEL and burned. ENGINE_ADDRESS is the ChessEngineV5 address from the Sepolia engine launch (launch/engine.json). Everything else as in launch/hook.json. turnBlocks 3, as on Ethereum (12-second blocks on both)."
 }

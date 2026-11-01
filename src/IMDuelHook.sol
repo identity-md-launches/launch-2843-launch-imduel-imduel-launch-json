@@ -4,8 +4,6 @@ pragma solidity ^0.8.26;
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
-import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
@@ -35,24 +33,24 @@ interface IERC20Min {
 /// whoever builds that last block: it can bid in it and try several versions of it, keeping the hash whose move pays
 /// (an accepted risk).
 /// Only checkmates pay: a mate takes a quarter of the losing team's pot and pays it to the move that mated, in the
-/// loser's token, at most twice what that move's trade paid and at most twice what the game's trading put into the
-/// pots (so a game played for dust pays nothing); whatever isn't paid stays in the pot. Rewards are
-/// recorded and their owners claim them (withdraw): no reward
-/// is ever sent inside a trade, so no recipient runs code while a trader's PoolManager is unlocked. (The one transfer a
-/// trade can make is the slice batch's burn of $IMDUEL to 0x...dEaD, an address with no code, of a plain token with no
-/// transfer callbacks, in a try/catch that can't revert the trade.) The owner is the address the trade names in
-/// hookData, else the wallet that signed the transaction, so a trade through any router earns.
-/// Money: 0.75% of every swap. 0.65% goes to the pool's pot (chest) worth less; 0.1% (the protocol slice) is converted
-/// into $IMDUEL in batches, half added to the main duel's $IMDUEL pot and half burned. So every duel pairs a token with
-/// IMD or $IMDUEL: one with no route to $IMDUEL can't open. A trade must swap its whole order: the fee part taken
-/// before the swap counts all of it.
+/// loser's token, at most twice what that move's trade paid and at most what the game's trades paid into that pot
+/// (so a game played for dust pays nothing, and nobody wins back more than a game put in); whatever
+/// isn't paid stays in the pot. Rewards are recorded and their owners claim them (withdraw): no reward is ever sent
+/// inside a trade, so no recipient runs code while a trader's PoolManager is unlocked (a recipient may trade inside
+/// its own withdraw's unlock: nothing is pending then, the books are exact). The owner is the address the
+/// trade names in hookData, else the wallet that signed the transaction, so a trade through any router earns.
+/// Money: 0.75% of every swap. 0.65% fills the pots, half from each side of the trade into that token's pot, so every
+/// trade feeds both by about the same value and they stay balanced; 0.1% (the protocol slice) is taken in $IMDUEL
+/// where the pool holds it and burned (owed to 0x...dEaD, sent by anyone's withdraw), and else in IMD, into the main
+/// duel's IMD pot. So every duel pairs a token with IMD or $IMDUEL. The hook reads no prices: nothing it does depends on where a trade can push one
+/// (audits 2026-11-01). A trade must swap its whole order: the fee part taken before the swap counts all of it.
 /// Stats: every player (an address) of the main duel has two words of counts (stats), kept for badges and display
-/// only: they never pay or limit anything. Side duels count nothing (their empty pots play at the cap for free).
+/// only: they never pay or limit anything. Every move a trade's bid plays counts for its owner, mates included; side
+/// duels count nothing (their empty pots play at the cap for free).
 /// It implements only the callbacks its permission bits enable; the pool manager calls no others.
 contract IMDuelHook is IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
-    using StateLibrary for IPoolManager;
 
     // ---------------------------------------------------------------- rules of play
     uint256 public constant TURN_TIMEOUT = 600; // seconds without a move before the side to move plays at 0%
@@ -67,30 +65,25 @@ contract IMDuelHook is IUnlockCallback {
     address internal constant HISTORY = 0x0000F90827F1C53a10cb7A02335B175320002935;
 
     // ---------------------------------------------------------------- money
-    uint256 public constant CHEST_BPS = 65;
+    uint256 public constant CHEST_BPS = 65; // the pot fee in all: half of it from each side of a trade
     uint256 public constant SLICE_BPS = 10;
     uint24 public constant HOOK_FEE_PIPS = uint24((CHEST_BPS + SLICE_BPS) * 100); // the hook fee as URC-2 reports it (0.75%)
     uint256 public constant MATE_SHARE_BPS = 2_500; // a mate takes a quarter of the losing team's pot, for the move that mated
     uint256 public constant PAYOUT_CAP = 2; // a mate pays at most twice what its move's trade paid
-    uint256 public constant MATE_INFLOW_CAP = 2; // and at most twice what the game's trading put into the pots
+    uint256 public constant MATE_INFLOW_CAP = 1; // and at most what the game's trades paid into the losing pot
     uint256 internal constant IN_MAX = (1 << 112) - 1; // a pot's inflow in a game, as gameIn packs it
-    uint256 internal constant CONVERT_GAS = 800_000;
-    uint256 internal constant BATCH_SQRT_BPS = 10; // a conversion batch stops 0.1% of the sqrt price away (~0.2%)
-    uint256 internal constant BATCH_MINS = 10; // a batch spends at most 10 minimums (_batch), one per block
-    uint256 internal constant SAMPLE_BITS = 56; // a sampled sqrt price: 8-bit exponent, 48-bit mantissa (_pack)
     address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
 
     IPoolManager public immutable manager;
     IChessEngine public immutable engine; // chooses each move and plays it by the rules (Rules.sol)
     Currency public immutable imd;
-    uint256 internal immutable minImd; // smallest pile worth a conversion batch, per routing currency
-    uint256 internal immutable minImduel;
     uint256 public immutable turnBlocks; // how many blocks a move stays open for bids once the previous one is played
 
     struct Game {
         bool live; // pool initialized with this hook
-        uint8 slice; // which currency (0 or 1) the protocol slice is taken in
-        uint32 gameNo; // the team of the token people buy (not the slice side) plays White in even games
+        uint8 base; // which currency (0 or 1) is IMD (else $IMDUEL): its team plays Black in game 0 (teamOf)
+        uint8 slice; // which currency (0 or 1) the protocol slice is taken in: $IMDUEL where the pool has it, else IMD
+        uint32 gameNo; // the team of the token people buy (not the base) plays White in even games
         uint16 ply; // half-moves played in this game; odd = Black to move
         uint16 quiet; // half-moves since the last capture or pawn move
         uint32 whiteState;
@@ -139,20 +132,13 @@ contract IMDuelHook is IUnlockCallback {
     // The main duel, $IMDUEL / IMD: the first pool opened on this hook. The IMD launch factory deploys the hook, mints
     // $IMDUEL and opens this pool in one transaction, so $IMDUEL's address isn't known at construction.
     Currency public imduel;
-    uint24 internal mainFee;
-    int24 internal mainSpacing;
     PoolId public mainId;
-    // The main duel's price samples, one slot (_sample): the block of the latest batch (40 bits), the block of the
-    // latest sample (40), and the price at the start of the three latest sampled blocks (56 each, newest lowest).
-    // A batch buys within 0.1% (sqrt) of the most hook-favourable of the three, so a price pushed inside a block, or
-    // at the end of the block before, can't sell the hook $IMDUEL dear: it must be held through two public blocks.
-    // Every trade and batch of the main duel samples it before moving its price.
-    uint256 internal samples;
     // Each pool's pot inflow this game, for the mate's inflow cap: the game number in the top 32 bits, then pot 1's
-    // and pot 0's inflow in 112 bits each (the pot fee only; donations don't count). A slot left by an earlier game
+    // and pot 0's inflow in 112 bits each (the pot fee only, half of every trade's into each; donations and slices
+    // don't count), recorded after the trade's move,
+    // so a trade that ends a game counts for the next one, the game its bid is for. A slot left by an earlier game
     // reads as empty, so nothing is cleared between games. Read through gameInflow.
     mapping(PoolId => uint256) internal gameIn;
-    mapping(uint256 => uint256) public pile; // protocol slices waiting for conversion, by currency id
     mapping(address => mapping(uint256 => uint256)) public owed; // rewards to claim (withdraw), by currency id
     // Per player: [0] counts per move, [1] rarer counts (layout at stats()); never read by any rule of the game
     mapping(address => uint256[2]) internal counts;
@@ -178,37 +164,29 @@ contract IMDuelHook is IUnlockCallback {
     event MatePaid(PoolId indexed pool, uint32 gameNo, address owner, Currency currency, uint256 amount);
     event Withdrawn(address indexed who, Currency currency, uint256 amount);
     event ChestFunded(PoolId indexed pool, address indexed from, Currency currency, uint256 amount);
-    event Converted(Currency indexed from, uint256 spent, uint256 bought, uint256 burned);
     event MainDuel(PoolId indexed pool, Currency imduel);
     // URC-2: the hook's own delta of a swap (the hook fee), in pool token order from the swapper's side, so indexers
     // add it to the PoolManager's Swap event and see what the trader really paid
     event HookSwap(PoolId indexed id, address indexed sender, int128 amount0, int128 amount1, uint24 swapFee);
 
     error NotManager();
-    error NotSelf();
     error NotLive();
     error BadValue();
     error BadConfig();
     error NotEnoughGas(); // the engine ran out of gas: send the trade with more
-    error NoRoute(); // a duel pairs IMD or $IMDUEL, so its slice converts into $IMDUEL
+    error NoRoute(); // a duel pairs IMD or $IMDUEL, so its slice has a main duel pot to go to
     error PartialFill(); // the trade's price limit stopped it before its whole order traded
 
     /// Plain arguments, as the IMD launch factory passes them (launch.json): the PoolManager, the engine, IMD (the
-    /// currency the main duel pairs with; native ETH for an ETH-paired launch), the smallest pile worth a conversion
-    /// batch in IMD and in $IMDUEL (a batch spends at most BATCH_MINS of it), and how many blocks a move stays open
+    /// currency the main duel pairs with; native ETH for an ETH-paired launch) and how many blocks a move stays open
     /// for bids (3 on Ethereum, about 36 seconds; at least 1).
-    constructor(IPoolManager manager_, IChessEngine engine_, Currency imd_, uint256 minImd_, uint256 minImduel_,
-        uint256 turnBlocks_)
-    {
+    constructor(IPoolManager manager_, IChessEngine engine_, Currency imd_, uint256 turnBlocks_) {
         // the engine is not checked here: the launch's admission tests build the hook on a chain where it has no code
-        // (hook job f7f2a606); its address is checked off chain, and a trade with no engine to answer just waits
-        // a zero minimum would make every batch spend nothing (_batch), so the slice would never convert
-        if (address(engine_) == address(0) || turnBlocks_ == 0 || turnBlocks_ > 1_000 || minImd_ == 0 || minImduel_ == 0) {
-            revert BadConfig();
-        }
+        // (hook job f7f2a606); its address is checked off chain (with no engine there every game ends as a draw at its
+        // first move: _endByEngine)
+        if (address(engine_) == address(0) || turnBlocks_ == 0 || turnBlocks_ > 1_000) revert BadConfig();
         turnBlocks = turnBlocks_;
         (manager, engine, imd) = (manager_, engine_, imd_);
-        (minImd, minImduel) = (minImd_, minImduel_);
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
     }
 
@@ -245,18 +223,19 @@ contract IMDuelHook is IUnlockCallback {
         return players.length;
     }
 
-    /// What trading put into pool `id`'s pots during its game `gameNo` (the pot fee only: donations don't count), in
-    /// each pot's own token. A mate in that game pays at most MATE_INFLOW_CAP times both, valued in the loser's token.
+    /// What trading put into pool `id`'s pots during its game `gameNo` (the pot fee, half of every trade's into each:
+    /// donations and slices don't count), in each pot's own token. A mate in that game pays at most MATE_INFLOW_CAP
+    /// times the loser's.
     function gameInflow(PoolId id, uint32 gameNo) public view returns (uint256 in0, uint256 in1) {
         uint256 w = gameIn[id];
         if (w >> 224 == gameNo) (in0, in1) = (w & IN_MAX, (w >> 112) & IN_MAX);
     }
 
     /// The team (0: currency0's, 1: currency1's) playing a side in a game. In game 0 White is the team of the token
-    /// people buy, the side the slice isn't taken in (the main duel: $IMDUEL, so buyers move first at launch, when
-    /// the pool holds no IMD to sell for); colours alternate every game.
-    function teamOf(uint8 slice, uint32 gameNo, bool black) internal pure returns (uint256) {
-        return (gameNo & 1) ^ (black ? 1 : 0) ^ (slice ^ 1);
+    /// people buy, the side that isn't the base (the main duel: $IMDUEL, so buyers move first at launch, when the pool
+    /// holds no IMD to sell for); colours alternate every game.
+    function teamOf(uint8 base, uint32 gameNo, bool black) internal pure returns (uint256) {
+        return (gameNo & 1) ^ (black ? 1 : 0) ^ (base ^ 1);
     }
 
     // ---------------------------------------------------------------- hook callbacks
@@ -271,33 +250,28 @@ contract IMDuelHook is IUnlockCallback {
             // the first pool is the main duel: it must pair IMD with a token, $IMDUEL (else the opening reverts)
             Currency token = c0 == imd ? c1 : c0;
             if (!(c0 == imd || c1 == imd) || token.isAddressZero()) revert BadConfig();
-            (imduel, mainFee, mainSpacing, mainId) = (token, key.fee, key.tickSpacing, id);
+            (imduel, mainId) = (token, id);
             g.main = true;
             emit MainDuel(id, token);
         }
-        // every duel's slice buys $IMDUEL: one side must be IMD or $IMDUEL
+        // every duel's slice goes to a main duel pot: one side must be IMD or $IMDUEL
         if (!(c0 == imd || c1 == imd || c0 == imduel || c1 == imduel)) revert NoRoute();
-        // the slice is taken in the side it converts from most simply: IMD, then $IMDUEL
-        g.slice = c1 == imd ? 1 : c0 == imd ? 0 : c1 == imduel ? 1 : 0;
+        g.base = c1 == imd ? 1 : c0 == imd ? 0 : c1 == imduel ? 1 : 0;
+        g.slice = c1 == imduel ? 1 : c0 == imduel ? 0 : g.base;
         _newGame(id, g);
         return IHooks.afterInitialize.selector;
     }
 
-    /// Reads the pool's price once for the whole swap (which pot is worth less) and takes the parts of the fee due in
-    /// the specified currency. The rest is taken in afterSwap.
+    /// Takes the parts of the fee due in the specified currency; the rest is taken in afterSwap.
     function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         external
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         _onlyManager();
         PoolId id = key.toId();
-        Game storage g = games[id];
-        (uint160 sqrtPrice,,,) = manager.getSlot0(id);
-        if (g.main) _sample(sqrtPrice);
-        uint256 chestIdx = _smallerChest(id, sqrtPrice);
         int256 a = params.amountSpecified;
-        int128 taken = _takeFee(id, key, _specified(params), uint256(a < 0 ? -a : a), chestIdx, g);
-        _stash(chestIdx, taken);
+        int128 taken = _takeFee(id, key, _specified(params), uint256(a < 0 ? -a : a), games[id]);
+        _stash(taken);
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(taken, 0), 0);
     }
 
@@ -308,46 +282,47 @@ contract IMDuelHook is IUnlockCallback {
         _onlyManager();
         PoolId id = key.toId();
         Game storage g = games[id];
-        (uint256 chestIdx, int128 taken) = _unstash();
+        int128 taken = _unstash();
         uint256 specIdx = _specified(params);
         // the whole order, less the fee taken before the swap, must have traded: that fee counted all of it, so a trade
         // its price limit stopped early would pay it on what never traded
         if (int256(specIdx == 0 ? delta.amount0() : delta.amount1()) != params.amountSpecified + taken) revert PartialFill();
         uint256 unspecIdx = 1 - specIdx;
-        int128 fee = _takeFee(id, key, unspecIdx, _abs(unspecIdx == 0 ? delta.amount0() : delta.amount1()), chestIdx, g);
+        int128 fee = _takeFee(id, key, unspecIdx, _abs(unspecIdx == 0 ? delta.amount0() : delta.amount1()), g);
         (int128 hook0, int128 hook1) = specIdx == 0 ? (taken, fee) : (fee, taken);
         if (hook0 != 0 || hook1 != 0) emit HookSwap(id, sender, -hook0, -hook1, HOOK_FEE_PIPS); // URC-2: only when the hook took something
-        if (!_locked()) {
-            _lock(true);
-            _play(id, key, g, params.zeroForOne, delta, hookData);
-            _lock(false);
-        }
+        _play(id, key, g, params.zeroForOne, delta, hookData);
+        (uint256 in0, uint256 in1) = _unpend();
+        if (in0 | in1 != 0) _addInflow(id, g.gameNo, in0, in1);
         return (IHooks.afterSwap.selector, fee);
     }
 
     // ---------------------------------------------------------------- fees and chests
 
-    /// Takes the chest share and the slice that fall in currency `idx` of a trade side of `amount`, as balance claims.
-    function _takeFee(PoolId id, PoolKey calldata key, uint256 idx, uint256 amount, uint256 chestIdx, Game storage g)
+    /// Takes the pot fee and the slice that fall in currency `idx` of a trade side of `amount`, as balance claims: half
+    /// the pot fee from each side into that side's token's pot, so every trade feeds both pots by about the same value
+    /// and they stay balanced with no price read; the slice on the pool's slice side (_slice).
+    function _takeFee(PoolId id, PoolKey calldata key, uint256 idx, uint256 amount, Game storage g)
         internal
         returns (int128)
     {
-        uint256 toChest = chestIdx == idx ? _addChest(id, idx, amount * CHEST_BPS / 10_000) : 0;
-        if (toChest != 0) _addInflow(id, g.gameNo, idx, toChest);
-        uint256 toPile = g.slice == idx ? amount * SLICE_BPS / 10_000 : 0;
-        uint256 fee = toChest + toPile;
-        if (fee == 0) return 0;
+        uint256 toChest = _addChest(id, idx, amount * CHEST_BPS / 20_000); // half the pot fee, from this side
+        if (toChest != 0) _pend(idx, toChest); // the game's inflow, counted after the trade's move (afterSwap)
         Currency c = idx == 0 ? key.currency0 : key.currency1;
+        uint256 fee = toChest + (g.slice == idx ? _slice(c, amount * SLICE_BPS / 10_000) : 0);
+        if (fee == 0) return 0;
         manager.mint(address(this), c.toId(), fee);
-        if (toPile != 0) pile[c.toId()] += toPile;
         return int128(int256(fee));
     }
 
-    /// The chest worth less at the pool's price (0 or 1), so the fee keeps both chests about equal.
-    function _smallerChest(PoolId id, uint160 sqrtPrice) internal view returns (uint256) {
-        uint256 both = chests[id];
-        uint256 value0 = FullMath.mulDiv(FullMath.mulDiv(uint128(both), sqrtPrice, 1 << 96), sqrtPrice, 1 << 96);
-        return value0 <= both >> 128 ? 0 : 1;
+    /// Books a protocol slice of `amount` in `c` (the caller mints it) and returns what was taken: $IMDUEL is burned,
+    /// owed to 0x...dEaD (anyone's withdraw sends it); IMD (a duel without $IMDUEL) goes to the main duel's IMD pot,
+    /// what fits.
+    function _slice(Currency c, uint256 amount) internal returns (uint256) {
+        if (amount == 0) return 0;
+        if (c == imd) return _addChest(mainId, imd < imduel ? 0 : 1, amount);
+        owed[DEAD][c.toId()] += amount;
+        return amount;
     }
 
     /// Adds up to `amount` to chest `i` and returns what fit: a chest holds at most 2^128 - 1 (a token with more
@@ -365,24 +340,14 @@ contract IMDuelHook is IUnlockCallback {
         chests[id] -= i == 0 ? amount : amount << 128;
     }
 
-    /// Adds `amount` to pot `i`'s inflow of game `gameNo` (gameIn), starting the slot over when it holds an earlier game.
-    function _addInflow(PoolId id, uint32 gameNo, uint256 i, uint256 amount) internal {
+    /// Adds `in0` and `in1` to the pots' inflow of game `gameNo` (gameIn) in one write, starting the slot over when it
+    /// holds an earlier game; each saturates at IN_MAX.
+    function _addInflow(PoolId id, uint32 gameNo, uint256 in0, uint256 in1) internal {
         uint256 w = gameIn[id];
-        if (w >> 224 != gameNo) w = uint256(gameNo) << 224;
-        uint256 shift = i * 112;
-        uint256 have = (w >> shift) & IN_MAX;
-        uint256 n = amount >= IN_MAX - have ? IN_MAX : have + amount;
-        gameIn[id] = (w & ~(IN_MAX << shift)) | (n << shift);
-    }
-
-    /// What game `gameNo`'s trading put into both pots, in pot `loser`'s token: the other pot's inflow valued at the
-    /// pool's price now. It can only lower a prize, never raise it above the quarter, so a pushed price gains nothing.
-    function _inflowIn(PoolId id, uint32 gameNo, uint256 loser) internal view returns (uint256) {
-        (uint256 in0, uint256 in1) = gameInflow(id, gameNo);
-        (uint160 sqrtPrice,,,) = manager.getSlot0(id);
-        return loser == 0
-            ? in0 + FullMath.mulDiv(FullMath.mulDiv(in1, 1 << 96, sqrtPrice), 1 << 96, sqrtPrice)
-            : in1 + FullMath.mulDiv(FullMath.mulDiv(in0, sqrtPrice, 1 << 96), sqrtPrice, 1 << 96);
+        (uint256 have0, uint256 have1) = w >> 224 == gameNo ? (w & IN_MAX, (w >> 112) & IN_MAX) : (0, 0);
+        uint256 n0 = in0 >= IN_MAX - have0 ? IN_MAX : have0 + in0;
+        uint256 n1 = in1 >= IN_MAX - have1 ? IN_MAX : have1 + in1;
+        gameIn[id] = (uint256(gameNo) << 224) | (n1 << 112) | n0;
     }
 
     function _send(Currency c, address to, uint256 amount) internal {
@@ -413,7 +378,8 @@ contract IMDuelHook is IUnlockCallback {
     }
 
     /// Adds to a team's war chest. Anyone can; the chest records what actually arrived. For native ETH send exactly
-    /// `amount` as value; for tokens approve the hook first.
+    /// `amount` as value; for tokens approve the hook first. A bigger pot makes its team's buys weaker (strength is a
+    /// buy's share of its own pot), and a donation never counts as a game's inflow.
     function fundChest(PoolKey calldata key, bool inCurrency1, uint256 amount) external payable {
         PoolId id = key.toId();
         if (!games[id].live) revert NotLive();
@@ -424,21 +390,12 @@ contract IMDuelHook is IUnlockCallback {
         emit ChestFunded(id, msg.sender, c, paid);
     }
 
-    /// Converts one batch of the protocol slice held in `c` now (it also happens by itself inside trades).
-    function convert(Currency c) external {
-        manager.unlock(abi.encode(uint8(2), abi.encode(address(0), c, uint256(0))));
-    }
-
     function unlockCallback(bytes calldata data) public virtual returns (bytes memory) {
         _onlyManager();
         (uint8 action, bytes memory body) = abi.decode(data, (uint8, bytes));
         (address who, Currency c, uint256 amount) = abi.decode(body, (address, Currency, uint256));
         if (action == 0) {
             _send(c, who, amount);
-            return "";
-        }
-        if (action == 2) {
-            _convert(c);
             return "";
         }
         manager.sync(c);
@@ -455,129 +412,19 @@ contract IMDuelHook is IUnlockCallback {
         return abi.encode(paid);
     }
 
-    // ---------------------------------------------------------------- the protocol slice
-
-    function convertBatch(Currency c) external {
-        _onlySelf();
-        _convert(c);
-    }
-
-    /// One batch of the pile in `c` into $IMDUEL, with balance claims only: IMD buys $IMDUEL in the main duel, up to
-    /// a price limit (_swapClaims); what isn't spent stays in the pile. Half the $IMDUEL goes to the main duel's
-    /// $IMDUEL chest, half is burned. The hook's own swaps skip its callbacks: they play no move and pay no fee.
-    function _convert(Currency c) internal {
-        uint256 id = c.toId();
-        uint256 amount = pile[id];
-        if (amount == 0) return;
-        uint256 spent = amount;
-        uint256 bought = amount;
-        if (c == imd) {
-            (spent, bought) = _swapClaims(_mainKey(), imd, _batch(amount, minImd));
-        } else if (!(c == imduel)) {
-            return; // no slice is taken in it (every duel pairs IMD or $IMDUEL), so there is nothing to convert
-        }
-        pile[id] = amount - spent;
-        uint256 kept = _addChest(mainId, imduel < imd ? 0 : 1, bought - bought / 2);
-        uint256 burned = bought - kept; // half, or more if the chest is full
-        if (burned != 0) _send(imduel, DEAD, burned);
-        emit Converted(c, spent, bought, burned);
-    }
-
-    /// The most a batch of a pile of `amount` spends: BATCH_MINS minimums (`min`), or the pile.
-    function _batch(uint256 amount, uint256 min) internal pure returns (uint256) {
-        if (amount / BATCH_MINS < min) return amount; // under the bound (so too for a `min` too large to multiply)
-        uint256 most = BATCH_MINS * min; // fits: it is at most `amount`
-        return amount > most ? most : amount;
-    }
-
-    /// Swaps `amountIn` of `input` in the main duel (`key`) up to the batch price limit, paying and receiving as
-    /// balance claims. The limit is 0.1% (sqrt) past the pool's reference price (_reference: the limit is a band, and
-    /// an attacker could fill a band past a price it pushed with its own liquidity). Nothing is bought once the price
-    /// is past the limit, while fewer than three blocks are sampled, or when a batch already swapped this block (one
-    /// per block: a pushed price must not sell the pile batch after batch).
-    function _swapClaims(PoolKey memory key, Currency input, uint256 amountIn)
-        internal
-        returns (uint256 spent, uint256 got)
-    {
-        bool zeroForOne = input == key.currency0;
-        (uint160 sqrtPrice,,,) = manager.getSlot0(key.toId());
-        uint256 s = _sample(sqrtPrice);
-        uint256 from = _reference(s, zeroForOne);
-        if (from == 0 || amountIn == 0) return (0, 0);
-        uint160 limit = uint160(
-            zeroForOne ? from * (10_000 - BATCH_SQRT_BPS) / 10_000 : from * (10_000 + BATCH_SQRT_BPS) / 10_000
-        );
-        if (zeroForOne ? limit >= sqrtPrice : limit <= sqrtPrice) return (0, 0);
-        BalanceDelta d = manager.swap(key, SwapParams(zeroForOne, -int256(amountIn), limit), "");
-        (int128 inDelta, int128 outDelta) = zeroForOne ? (d.amount0(), d.amount1()) : (d.amount1(), d.amount0());
-        spent = uint256(uint128(-inDelta));
-        got = uint256(uint128(outDelta));
-        manager.burn(address(this), input.toId(), spent);
-        manager.mint(address(this), (zeroForOne ? key.currency1 : key.currency0).toId(), got);
-        samples = (s & ((1 << 208) - 1)) | (block.number << 208); // this block's batch
-    }
-
-    /// Records `sqrtPrice` as the main duel's price at the start of this block, once per block (the first observation
-    /// of a block comes before any swap of it has moved the price), and returns the samples word.
-    function _sample(uint160 sqrtPrice) internal returns (uint256 s) {
-        s = samples;
-        if ((s >> 168) & 0xffffffffff == block.number) return s;
-        s = (s & (0xffffffffff << 208)) | (block.number << 168) | ((s << SAMPLE_BITS) & ((1 << 168) - 1)) | _pack(sqrtPrice);
-        samples = s;
-    }
-
-    /// The reference price of a batch from the samples in `s`: the most hook-favourable of the three latest sampled
-    /// blocks' start prices (selling currency0 the price falls: the highest; else the lowest). 0 while fewer than three
-    /// blocks are sampled or a batch already swapped there this block.
-    function _reference(uint256 s, bool zeroForOne) internal view returns (uint256 from) {
-        if (s >> 208 == block.number || (s >> (2 * SAMPLE_BITS)) & ((1 << SAMPLE_BITS) - 1) == 0) return 0;
-        for (uint256 i; i < 3; i++) {
-            uint256 p = _unpack((s >> (i * SAMPLE_BITS)) & ((1 << SAMPLE_BITS) - 1));
-            if (i == 0 || (zeroForOne ? p > from : p < from)) from = p;
-        }
-    }
-
-    /// A sqrt price as an 8-bit exponent and a 48-bit mantissa (a rounding of 2^-47, nothing next to the 0.1% band).
-    function _pack(uint160 p) internal pure returns (uint256) {
-        uint256 v = p;
-        uint256 e;
-        if (v >= 1 << 112) (v, e) = (v >> 64, 64);
-        if (v >= 1 << 80) (v, e) = (v >> 32, e + 32);
-        if (v >= 1 << 64) (v, e) = (v >> 16, e + 16);
-        if (v >= 1 << 56) (v, e) = (v >> 8, e + 8);
-        if (v >= 1 << 52) (v, e) = (v >> 4, e + 4);
-        if (v >= 1 << 50) (v, e) = (v >> 2, e + 2);
-        if (v >= 1 << 49) (v, e) = (v >> 1, e + 1);
-        if (v >= 1 << 48) (v, e) = (v >> 1, e + 1);
-        return e << 48 | v;
-    }
-
-    function _unpack(uint256 packed) internal pure returns (uint256) {
-        return (packed & ((1 << 48) - 1)) << (packed >> 48);
-    }
-
-    function _mainKey() internal view returns (PoolKey memory) {
-        (Currency c0, Currency c1) = imd < imduel ? (imd, imduel) : (imduel, imd);
-        return PoolKey(c0, c1, mainFee, mainSpacing, IHooks(address(this)));
-    }
-
-    function _minBatch(Currency c) internal view returns (uint256) {
-        return c == imd ? minImd : c == imduel ? minImduel : type(uint256).max;
-    }
-
     // ---------------------------------------------------------------- moves: every buy bids
 
     /// The game side of a swap: a move whose window has closed is played first; then this trade bids for its team's
     /// next move (the move being bid for now, if its team is to move) and takes the top spot if it pays more than
     /// RAISE_PCT over the current top; a trade of the other team after TURN_TIMEOUT of silence opens the silent side's
-    /// move at 0%; then a slice batch converts if this pool's pile is ready.
+    /// move at 0%.
     function _play(PoolId id, PoolKey calldata key, Game storage g, bool zeroForOne, BalanceDelta delta,
         bytes calldata hookData) internal
     {
-        uint256 mover = teamOf(g.slice, g.gameNo, g.ply & 1 == 1);
+        uint256 mover = teamOf(g.base, g.gameNo, g.ply & 1 == 1);
         if (g.bids[mover].open && block.number > g.closeBlock) {
             _resolve(id, key, g, mover);
-            mover = teamOf(g.slice, g.gameNo, g.ply & 1 == 1);
+            mover = teamOf(g.base, g.gameNo, g.ply & 1 == 1);
         }
         uint256 team = zeroForOne ? 1 : 0; // the token bought
         TopBid storage b = g.bids[team];
@@ -585,11 +432,9 @@ contract IMDuelHook is IUnlockCallback {
             ? (_abs(delta.amount0()), _abs(delta.amount1()))
             : (_abs(delta.amount1()), _abs(delta.amount0()));
         if (team == mover) {
-            bool late = block.number > g.closeBlock;
-            // a move whose window closed but that couldn't be played (the engine failed twice; it shouldn't) takes
-            // no more bids
-            if (!(late && b.open) && _beats(paid, b)) {
-                if (late) g.closeBlock = uint40(block.number); // the window passed without a bid: this block is it
+            if (_beats(paid, b)) {
+                // the window passed without a bid (else _resolve just played or reopened it): this block is it
+                if (block.number > g.closeBlock) g.closeBlock = uint40(block.number);
                 _bid(id, g, team, g.ply, _trade(id, team, paid, got, hookData));
             }
         } else {
@@ -599,10 +444,6 @@ contract IMDuelHook is IUnlockCallback {
                 g.closeBlock = uint40(block.number);
                 _bid(id, g, mover, g.ply, Trade(0, address(0), 0));
             }
-        }
-        Currency s = g.slice == 0 ? key.currency0 : key.currency1;
-        if (pile[s.toId()] >= _minBatch(s)) {
-            try this.convertBatch{gas: CONVERT_GAS}(s) {} catch {}
         }
     }
 
@@ -616,13 +457,15 @@ contract IMDuelHook is IUnlockCallback {
         return Trade(paid, _owner(hookData), Strength.fromShare(got, chest(id, team)));
     }
 
-    /// Who a trade bids for: the address in its hookData, 20 bytes packed or 32 bytes ABI-encoded (a zero address
-    /// counts as none), else the wallet that signed the transaction, so a trade through any router or aggregator
-    /// earns. Known and accepted: a trade relayed for a smart-contract wallet without hookData credits the relayer.
+    /// Who a trade bids for: the address in its hookData, 20 bytes packed or 32 bytes ABI-encoded (a zero address,
+    /// the hook or the PoolManager counts as none: rewards owed to those could never be claimed; so does 0x...dEaD,
+    /// whose owed balance is the burn and which must not play or list), else the wallet
+    /// that signed the transaction, so a trade through any router or aggregator earns. Known and accepted: a trade
+    /// relayed for a smart-contract wallet without hookData credits the relayer.
     function _owner(bytes calldata hookData) internal view returns (address owner) {
         if (hookData.length == 20) owner = address(bytes20(hookData));
         else if (hookData.length == 32 && uint256(bytes32(hookData)) <= type(uint160).max) owner = address(uint160(uint256(bytes32(hookData))));
-        if (owner == address(0)) owner = tx.origin;
+        if (owner == address(0) || owner == address(this) || owner == address(manager) || owner == DEAD) owner = tx.origin;
     }
 
     /// Whether a trade that paid `paid` takes the top spot from bid `b`: there is none, or it pays more than RAISE_PCT over it.
@@ -639,15 +482,17 @@ contract IMDuelHook is IUnlockCallback {
 
     /// Plays the side to move's move (team `mover`) at its top bid's strength. The dice are the hash of the window's
     /// last block, which didn't exist while anyone could still bid, except for that block's builder (see the contract
-    /// notes). A move whose block hash the chain no longer serves
-    /// (after 8,191 blocks, about a day) becomes a timeout move in this block. If the engine fails (it shouldn't), a
-    /// seeded legal move is played at 0%; if that fails too, the game ends as a draw. An engine starved by the trade's
+    /// notes). A move whose block hash the chain no longer serves (after 8,191 blocks, about a day) keeps its bid's
+    /// strength and size but is played for nobody, its window this block (its hash the dice): the board still gets
+    /// the paid strength, and letting a seen move expire to draw it again can never pay (audit 2026-11-01). If the
+    /// engine fails (it shouldn't), a seeded legal move is played at 0%; if that fails too, the game ends as a draw. An engine starved by the trade's
     /// gas limit reverts the trade, so gas estimates include the move.
     function _resolve(PoolId id, PoolKey calldata key, Game storage g, uint256 mover) internal {
         bytes32 h = _hashOf(g.closeBlock);
         if (h == 0) {
             g.closeBlock = uint40(block.number);
-            return _bid(id, g, mover, g.ply, Trade(0, address(0), 0));
+            TopBid memory kept = g.bids[mover];
+            return _bid(id, g, mover, g.ply, Trade(kept.size, address(0), kept.strength));
         }
         TopBid memory b = g.bids[mover];
         Trade memory t = Trade(b.size, b.owner, b.strength);
@@ -683,11 +528,13 @@ contract IMDuelHook is IUnlockCallback {
     /// last block: fixed as soon as that block is complete, which is before the chain can read the hash itself (false
     /// before that block, or without a bid). A view for the site to show each move as soon as it is fixed: called at the
     /// latest block, it runs after all of that block's trades. A caller inside the closing block itself gets an answer
-    /// a later trade in that block can still change (it can still take the top bid).
+    /// a later trade in that block can still change (it can still take the top bid). Once the chain serves that hash
+    /// it is read here instead of `h`, and a hash it no longer serves means the next trade reopens the window: false.
     function previewMove(PoolId id, bytes32 h) external view returns (bool ready, uint16 move) {
         Game storage g = games[id];
-        TopBid memory b = g.bids[teamOf(g.slice, g.gameNo, g.ply & 1 == 1)];
+        TopBid memory b = g.bids[teamOf(g.base, g.gameNo, g.ply & 1 == 1)];
         if (!b.open || block.number < g.closeBlock) return (false, 0);
+        if (block.number > g.closeBlock && (h = _hashOf(g.closeBlock)) == 0) return (false, 0);
         (bool ok,, uint16 m,) = _choose(id, g, Trade(b.size, b.owner, b.strength), h);
         return (ok, m);
     }
@@ -769,7 +616,8 @@ contract IMDuelHook is IUnlockCallback {
             }
         }
         // the main duel only: a side duel costs its creator nothing and its empty pots play at the cap, so its counts
-        // could be farmed for gas (audit 2026-10-31)
+        // could be farmed for gas (audit 2026-10-31). Every trade bids, and every move it plays counts (user, 2026-11-02:
+        // a move of yours always counts; farming one costs the move's gas, ~330k)
         if (t.owner != address(0) && g.main) _count(id, g, t, move, board, piece, captured, r.check, result == (black ? 2 : 1));
         if (result != 0) {
             g.moveResult = result;
@@ -787,14 +635,16 @@ contract IMDuelHook is IUnlockCallback {
 
     /// Pays a mate by `team`'s move `t`: a quarter of the losing team's pot to the move's owner, in the loser's token,
     /// at most PAYOUT_CAP times what its trade paid (in that same token) and at most MATE_INFLOW_CAP times what the
-    /// game's trading put into the pots (a game played for dust pays nothing: the pot can't be harvested by fast
-    /// games); the rest stays in the pot. A move for nobody (a timeout) pays nobody. Recorded to claim (withdraw),
-    /// never sent inside the trade.
+    /// game's trades paid into that pot (a game played for dust pays nothing, and a game a player trades alone pays
+    /// back at most its own 0.325% into that pot, under the 0.75% it was charged); all in one token, no price.
+    /// The rest stays in the pot. A move for nobody (a timeout) pays nobody. Recorded to claim (withdraw), never sent
+    /// inside the trade; in the main duel what it paid counts for its owner.
     function _payMate(PoolId id, PoolKey calldata key, Game storage g, Trade memory t, uint256 team) internal {
         if (t.owner == address(0)) return;
         uint256 loser = 1 - team;
+        (uint256 in0, uint256 in1) = gameInflow(id, g.moveGameNo);
         uint256 amount = _min(chest(id, loser) * MATE_SHARE_BPS / 10_000, t.size * PAYOUT_CAP);
-        amount = _min(amount, _inflowIn(id, g.moveGameNo, loser) * MATE_INFLOW_CAP);
+        amount = _min(amount, (loser == 0 ? in0 : in1) * MATE_INFLOW_CAP);
         if (amount == 0) return;
         _takeChest(id, loser, amount);
         Currency c = loser == 0 ? key.currency0 : key.currency1;
@@ -832,10 +682,9 @@ contract IMDuelHook is IUnlockCallback {
         if (b != b0) w[1] = b;
     }
 
-    /// Adds what a mate won to its owner's counts: the amount in IMD or in $IMDUEL (other tokens are not counted).
+    /// Adds what a mate won to its owner's counts: the amount in IMD or in $IMDUEL.
     function _countWon(address o, Currency c, uint256 amount) internal {
-        uint256 shift = c == imd ? 140 : c == imduel ? 180 : 0;
-        if (shift != 0) counts[o][1] = _add(counts[o][1], shift, 40, amount / 1e15);
+        counts[o][1] = _add(counts[o][1], c == imd ? 140 : 180, 40, amount / 1e15);
     }
 
     /// Adds `by` to the `bits`-wide field at `shift` of `w`, stopping at the field's maximum (whatever `by` is).
@@ -926,37 +775,35 @@ contract IMDuelHook is IUnlockCallback {
         if (msg.sender != address(manager)) revert NotManager();
     }
 
-    function _onlySelf() internal view {
-        if (msg.sender != address(this)) revert NotSelf();
-    }
+    // transient storage: 1 the fee beforeSwap took, for afterSwap; 2 the swap's pot fee, for the game's inflow
 
-    // transient storage: 0 the re-entry lock, 1 what beforeSwap hands afterSwap
-
-    function _locked() internal view returns (bool l) {
+    /// The fee taken before the swap (never negative), for afterSwap.
+    function _stash(int128 taken) internal {
         assembly ("memory-safe") {
-            l := tload(0)
+            tstore(1, taken)
         }
     }
 
-    function _lock(bool on) internal {
+    function _unstash() internal view returns (int128 taken) {
         assembly ("memory-safe") {
-            tstore(0, on)
+            taken := tload(1)
         }
     }
 
-    /// Which pot the fee goes to and the fee taken before the swap, for afterSwap (`taken` is never negative).
-    function _stash(uint256 chestIdx, int128 taken) internal {
-        uint256 fee = uint128(taken);
+    /// A swap's pot fee into pot `i`, held until afterSwap counts it as the game's inflow: pot 0's in the low 128 bits,
+    /// pot 1's in the high (a pot holds under 2^128, so neither spills).
+    function _pend(uint256 i, uint256 toChest) internal {
         assembly ("memory-safe") {
-            tstore(1, or(fee, shl(128, chestIdx)))
+            tstore(2, add(tload(2), shl(mul(i, 128), toChest)))
         }
     }
 
-    function _unstash() internal view returns (uint256 chestIdx, int128 taken) {
+    function _unpend() internal returns (uint256 in0, uint256 in1) {
         assembly ("memory-safe") {
-            let w := tload(1)
-            taken := and(w, 0xffffffffffffffffffffffffffffffff)
-            chestIdx := shr(128, w)
+            let w := tload(2)
+            in0 := and(w, 0xffffffffffffffffffffffffffffffff)
+            in1 := shr(128, w)
+            tstore(2, 0)
         }
     }
 }

@@ -16,12 +16,12 @@ import {Chessboard} from "./Chessboard.sol";
 
 /// Shared setup: v4 PoolManager and routers, two test tokens, engine v5 and the hook (test harness) at an address
 /// carrying its permission bits. By default currency0 stands in for IMD and currency1 for $IMDUEL, and `pool` is
-/// their main duel (fee 3000, spacing 60). Conversion thresholds default to never, so slices just pile up.
+/// their main duel (fee 3000, spacing 60).
 abstract contract Base is Chessboard, V4Fixture {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
 
-    uint256 constant NEVER = type(uint256).max;
+    address constant DEAD = 0x000000000000000000000000000000000000dEaD; // where the hook's $IMDUEL burn is owed
     bytes32 constant MOVED = keccak256("Moved(bytes32,uint32,uint16,uint16,address,uint256,uint16,uint8,bool)");
     bytes32 constant BID = keccak256("Bid(bytes32,uint32,uint16,address,uint256,uint16)");
     bytes32 constant OVER = keccak256("GameOver(bytes32,uint32,uint8,uint16)");
@@ -47,9 +47,9 @@ abstract contract Base is Chessboard, V4Fixture {
         return 1;
     }
 
-    /// The hook with IMD `imd` and conversions never; $IMDUEL is the other token of the first pool opened.
+    /// The hook with IMD `imd`; $IMDUEL is the other token of the first pool opened.
     function config(IChessEngine e, Currency imd) internal view returns (HookConfig memory) {
-        return HookConfig(manager, e, imd, NEVER, NEVER, turnBlocks());
+        return HookConfig(manager, e, imd, turnBlocks());
     }
 
     /// A hook whose IMD and $IMDUEL are two fresh tokens, their main duel opened (no liquidity), so the default
@@ -93,7 +93,7 @@ abstract contract Base is Chessboard, V4Fixture {
 
     /// The team playing White in the current game: in game 0 the side the slice isn't taken in, then alternating.
     function whiteTeam() internal view returns (uint256) {
-        return (st().gameNo & 1) ^ (st().slice ^ 1);
+        return (st().gameNo & 1) ^ (st().base ^ 1);
     }
 
     uint256 constant WELL_TRADED = 1e24; // a game's inflow per pot that never binds the mate's inflow cap in a test
@@ -161,15 +161,6 @@ abstract contract Base is Chessboard, V4Fixture {
         vm.roll(vm.getBlockNumber() + 1);
     }
 
-    /// Three new blocks with a dust trade (100 wei: no fee) in pool `k`, so a batch there has the three sampled blocks
-    /// it needs.
-    function sampleBlocks(PoolKey memory k) internal {
-        for (uint256 i; i < 3; i++) {
-            next(12);
-            swap(k, true, -100, "");
-        }
-    }
-
     function st() internal view returns (IMDuelHook.Game memory) {
         return hook.game(id);
     }
@@ -177,7 +168,7 @@ abstract contract Base is Chessboard, V4Fixture {
     /// The top bid for the move being bid for now in pool `pid`: the side to move's.
     function bidOf(PoolId pid) internal view returns (IMDuelHook.TopBid memory) {
         IMDuelHook.Game memory g = hook.game(pid);
-        return g.bids[(g.gameNo & 1) ^ (g.slice ^ 1) ^ (g.ply & 1)];
+        return g.bids[(g.gameNo & 1) ^ (g.base ^ 1) ^ (g.ply & 1)];
     }
 
     /// bidOf the main duel.
@@ -193,22 +184,28 @@ abstract contract Base is Chessboard, V4Fixture {
         return manager.balanceOf(address(hook), c.toId());
     }
 
-    /// What the hook holds in `c`, and what it owes in `c`: the chests of `pools`, the slice pile and the rewards
-    /// recorded for `who` and for the signing wallet (the owner of every trade that names none).
+    /// What the hook holds in `c`, and what it owes in `c`: the chests of `pools` (with the main duel's, which takes
+    /// every pool's slice), the burn owed to 0x...dEaD and the rewards recorded for `who` and for the signing wallet
+    /// (the owner of every trade that names none).
     function books(Currency c, PoolKey[] memory pools, address[] memory who) internal view returns (uint256, uint256) {
-        uint256 total = hook.pile(c.toId()) + hook.owed(tx.origin, c.toId());
+        // the signing wallet can be anyone in an invariant run, 0x...dEaD included: count each owed slot once
+        uint256 total = hook.owed(DEAD, c.toId()) + (tx.origin == DEAD ? 0 : hook.owed(tx.origin, c.toId()));
+        bool main;
         for (uint256 i; i < pools.length; i++) {
             if (pools[i].currency0 == c) total += hook.chest(pools[i].toId(), 0);
             if (pools[i].currency1 == c) total += hook.chest(pools[i].toId(), 1);
+            main = main || PoolId.unwrap(pools[i].toId()) == PoolId.unwrap(hook.mainId());
         }
-        for (uint256 j; j < who.length; j++) if (who[j] != tx.origin) total += hook.owed(who[j], c.toId());
+        (Currency m0, Currency m1) = hook.imd() < hook.imduel() ? (hook.imd(), hook.imduel()) : (hook.imduel(), hook.imd());
+        if (!main && (c == m0 || c == m1)) total += hook.chest(hook.mainId(), c == m0 ? 0 : 1);
+        for (uint256 j; j < who.length; j++) if (who[j] != tx.origin && who[j] != DEAD) total += hook.owed(who[j], c.toId());
         return (claims(c), total);
     }
 
     /// Everything the hook holds in `c` is owed to someone.
     function assertSolvent(Currency c, PoolKey[] memory pools, address[] memory who) internal view {
         (uint256 held, uint256 total) = books(c, pools, who);
-        assertEq(held, total, "held = chests + pile + owed");
+        assertEq(held, total, "held = chests + burn + owed");
     }
 
     /// assertSolvent for the main duel alone, both currencies.

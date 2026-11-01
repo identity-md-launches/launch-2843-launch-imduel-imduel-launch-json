@@ -96,13 +96,20 @@ contract Handler is Test {
         hook.withdraw(owners[owner % owners.length], inCurrency1 ? key.currency1 : key.currency0);
     }
 
-    function convert(bool inCurrency1) external {
-        hook.convert(inCurrency1 ? key.currency1 : key.currency0);
+    /// Anyone sends the owed $IMDUEL burn to 0x...dEaD.
+    function burn() external {
+        hook.withdraw(address(0xdEaD), hook.imduel());
+    }
+
+    /// A long silence: past TURN_TIMEOUT and the 256 blocks BLOCKHASH serves (no history contract here), so timeouts
+    /// and expired windows happen in every run.
+    function idle() external {
+        vm.warp(vm.getBlockTimestamp() + 3_600);
+        vm.roll(vm.getBlockNumber() + 300);
     }
 }
 
-/// The main duel under random actions, with slice conversions on (a small batch minimum): every action succeeds,
-/// the books balance and the board stays sound.
+/// The main duel under random actions: every action succeeds, the books balance and the board stays sound.
 contract InvariantTest is Base {
     using CurrencyLibrary for Currency;
 
@@ -111,9 +118,7 @@ contract InvariantTest is Base {
     function setUp() public {
         deployV4();
         deployMintAndApprove2Currencies();
-        HookConfig memory c = config(v5(), currency0);
-        (c.minImd, c.minImduel) = (1e15, 1e15);
-        deployHook(c);
+        deployHook(config(v5(), currency0));
         (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
         addLiquidity(pool);
         handler = new Handler(hook, swapRouter, pool);

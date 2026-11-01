@@ -20,7 +20,7 @@ contract LaunchFilesTest is Base {
     /// launch fills them) and checks it against the file's pool block.
     function check(string memory file) internal {
         string memory json = vm.readFile(file);
-        assertEq(vm.parseJsonStringArray(json, ".hook.constructorArgs").length, 6, "constructor arguments");
+        assertEq(vm.parseJsonStringArray(json, ".hook.constructorArgs").length, 4, "constructor arguments");
         IChessEngine engine = v5();
         bytes memory args = LaunchPolicy.hookArgs(vm, json, address(manager), address(engine));
 

@@ -37,20 +37,19 @@ contract HookGasTest is Base {
     uint256 constant PLAIN_BUDGET = 200_000;
     uint256 constant BID_BUDGET = 230_000;
     // the trade that plays a turn, from a fresh pool jumped to a position, the move a new player's first: three first
-    // writes of the game plus the player's two stat words and the player list (2026-10-31; was 560k before the stats)
-    uint256 constant MOVING_BUDGET = 620_000;
+    // writes of the game plus the player's two stat words and the player list (2026-10-31; was 560k before the stats;
+    // 640k since both pots take a share of every trade, 2026-11-02: the bid it plays then sits at another strength,
+    // and the engine's share of the trade moves with strength; ~625k measured)
+    uint256 constant MOVING_BUDGET = 640_000;
     uint256 constant RUNNING_BUDGET = 480_000; // its average in a running game
-    uint256 constant CONVERSION_BUDGET = 350_000;
 
     function setUp() public {
         deployV4();
         deployMintAndApprove2Currencies();
     }
 
-    function open(uint256 minBatch) internal {
-        HookConfig memory c = config(v5(), currency0);
-        (c.minImd, c.minImduel) = (minBatch, minBatch);
-        deployHook(c);
+    function open() internal {
+        deployHook(config(v5(), currency0));
         (pool, id) = initPool(currency0, currency1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
         addLiquidity(pool);
         fundPots();
@@ -80,7 +79,7 @@ contract HookGasTest is Base {
     }
 
     function measure(bool middlegame) internal {
-        open(NEVER);
+        open();
         if (middlegame) {
             (uint256 b, uint32 w, uint32 k) = replay(3, 30);
             hook.setPosition(id, b, w, k, 30, 0);
@@ -109,7 +108,7 @@ contract HookGasTest is Base {
     /// half-move 20 (the last-move slot and the repetition ring already hold values, as in any game under way;
     /// test_middlegameGas jumps a fresh pool to a position and pays two first writes a live game never does).
     function test_runningGameGas() public {
-        open(NEVER);
+        open();
         trade(toMove(), 1e20, address(0xA)); // the first bid
         (uint256 total, uint256 n, uint256 max) = (0, 0, 0);
         for (uint256 i; i < 70; i++) {
@@ -154,14 +153,20 @@ contract HookGasTest is Base {
         emit log_named_uint("hook share of a moving trade: max", max);
     }
 
-    function test_conversionGas() public {
-        open(1e15);
-        sampleBlocks(pool);
-        trade(1 - whiteTeam(), 0.1e18, address(0)); // a plain trade warms up the pool; its slice stays below the minimum
-        uint256 plain = gasOf(1 - whiteTeam(), 0.1e18, address(0));
-        uint256 converting = gasOf(1 - whiteTeam(), 10e18, address(0)); // its slice passes the minimum
-        emit log_named_uint("plain trade", plain);
-        emit log_named_uint("trade that converts a batch", converting);
-        assertLt(converting - plain, CONVERSION_BUDGET, "conversion batch budget");
+    /// A side duel's trade books its slice into the main duel's pot (one more pot slot, no swap): a plain trade still.
+    function test_aSideDuelsSliceStaysAPlainTrade() public {
+        open();
+        MockERC20 x = mockToken("X", "X");
+        x.mint(address(this), 1e30);
+        x.approve(address(swapRouter), type(uint256).max);
+        x.approve(address(modifyLiquidityRouter), type(uint256).max);
+        Currency xc = Currency.wrap(address(x));
+        (Currency c0, Currency c1) = xc < currency0 ? (xc, currency0) : (currency0, xc);
+        (pool, id) = initPool(c0, c1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
+        addLiquidity(pool);
+        trade(1 - whiteTeam(), 1e18, address(0)); // warms up the pool and the main duel's pot slot
+        uint256 g = gasOf(1 - whiteTeam(), 1e18, address(0)); // pays its IMD slice into the main duel's IMD pot
+        emit log_named_uint("side duel trade with its slice", g);
+        assertLt(g, PLAIN_BUDGET, "plain trade budget");
     }
 }

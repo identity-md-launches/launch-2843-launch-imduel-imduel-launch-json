@@ -15,8 +15,6 @@ struct HookConfig {
     IPoolManager manager;
     IChessEngine engine;
     Currency imd;
-    uint256 minImd;
-    uint256 minImduel;
     uint256 turnBlocks;
 }
 
@@ -25,8 +23,15 @@ contract IMDuelHarness is IMDuelHook {
     using PoolIdLibrary for PoolKey;
 
     constructor(HookConfig memory c)
-        IMDuelHook(c.manager, c.engine, c.imd, c.minImd, c.minImduel, c.turnBlocks)
+        IMDuelHook(c.manager, c.engine, c.imd, c.turnBlocks)
     {}
+
+    uint16 internal applied = 9_000; // the strength applyMove's moves are played at
+
+    /// The strength the next applyMove calls play at (0: a bid without strength).
+    function setStrength(uint16 s) external {
+        applied = s;
+    }
 
     function setPosition(PoolId id, uint256 board, uint32 white, uint32 black, uint16 ply, uint16 quiet) external {
         Game storage g = games[id];
@@ -54,8 +59,8 @@ contract IMDuelHarness is IMDuelHook {
         Game storage g = games[id];
         bool black = g.ply & 1 == 1;
         (uint32 mover, uint32 other) = black ? (g.blackState, g.whiteState) : (g.whiteState, g.blackState);
-        Trade memory t = Trade(paid, owner, 9_000);
-        uint256 team = teamOf(g.slice, g.gameNo, black);
+        Trade memory t = Trade(paid, owner, applied);
+        uint256 team = teamOf(g.base, g.gameNo, black);
         _apply(id, g, move, Rules.move(g.board, mover, other, black, move), t, team);
         if (g.moveResult == (black ? 2 : 1)) _payMate(id, key, g, t, team);
     }

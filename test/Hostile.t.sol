@@ -245,7 +245,7 @@ contract HostileTest is Base {
         finalizeWithATinyTrade();
         assertEq(hook.owed(address(0xB0B), token.toId()), 25e18, "kept owed");
         assertEq(hook.chest(id, tokenTeam()), 75e18);
-        assertEq(claims(token), hook.chest(id, tokenTeam()) + 25e18 + hook.pile(token.toId()));
+        assertEq(claims(token), hook.chest(id, tokenTeam()) + 25e18 + hook.owed(DEAD, token.toId()));
         trade(tokenTeam(), 1e18, address(0)); // and trading goes on
     }
 

@@ -35,9 +35,7 @@ contract LaunchTest is Base {
         vm.etch(IMD, address(code).code);
         vm.etch(tokenAt, address(code).code);
         (imd, duel) = (Currency.wrap(IMD), Currency.wrap(tokenAt));
-        HookConfig memory c = config(v5(), imd);
-        c.minImd = 1e18; // convert the IMD slice once a pile holds 1 IMD
-        deployHook(c);
+        deployHook(config(v5(), imd));
 
         MockERC20(tokenAt).mint(address(this), SUPPLY);
         MockERC20(IMD).mint(address(this), 1_000_000e18);
@@ -85,32 +83,28 @@ contract LaunchTest is Base {
         assertEq(st().ply, 1, "White's move is played");
         assertTrue(bid().open && bid().owner == tx.origin, "a sell bids for Black");
 
-        // trading on: the IMD slice converts into $IMDUEL in the main duel itself, half to its chest, half burned
-        uint256 dead = MockERC20(Currency.unwrap(duel)).balanceOf(address(0xdEaD));
+        // trading on: every trade's slice is $IMDUEL, half owed to the burn and half into the $IMDUEL pot
         for (uint256 i; i < 30; i++) {
             next(12);
             if (nextTeam() == (duel == pool.currency0 ? 0 : 1)) buy(100e18);
             else sell(2_000_000e18);
         }
-        assertEq(MockERC20(Currency.unwrap(duel)).balanceOf(address(0xdEaD)), dead, "these trades swing the price every block: no batch trusts it yet");
-        sampleBlocks(pool); // a calm stretch of three blocks
-        next(12);
-        buy(100e18);
-        assertGt(MockERC20(Currency.unwrap(duel)).balanceOf(address(0xdEaD)), dead, "slice converted and half burned");
-        assertGt(hook.chest(id, duel == pool.currency0 ? 0 : 1), 0, "the $IMDUEL chest grows");
-        assertGt(st().ply, 20, "a move every block");
+        uint256 owed = hook.owed(DEAD, duel.toId());
+        assertGt(owed, 0, "half of every slice owed to the burn");
+        hook.withdraw(DEAD, duel);
+        assertEq(MockERC20(Currency.unwrap(duel)).balanceOf(DEAD), owed - 1, "burned by anyone's withdraw");
+        assertGt(hook.chest(id, duel == pool.currency0 ? 0 : 1), 0, "the $IMDUEL pot grows");
+        assertGt(uint256(st().gameNo) * 200 + st().ply, 20, "a move every block (a game may have ended on the way)");
         assertSolvent(nobody());
     }
 
     /// The Sepolia shape (hook launches there pair with ETH only), and an ETH-paired mainnet launch: "IMD" is native
-    /// ETH, the main duel $IMDUEL / ETH (10 ETH for the supply), the ETH slice converts in the main duel itself.
+    /// ETH, the main duel $IMDUEL / ETH (10 ETH for the supply); the slice is $IMDUEL there too.
     function test_launchPairedWithEth() public {
         deployV4();
         MockERC20 t = mockToken("IMDuel", "IMDUEL");
         (imd, duel) = (CurrencyLibrary.ADDRESS_ZERO, Currency.wrap(address(t)));
-        HookConfig memory c = config(v5(), imd);
-        c.minImd = 0.01 ether;
-        deployHook(c);
+        deployHook(config(v5(), imd));
         t.mint(address(this), SUPPLY);
         t.approve(address(swapRouter), type(uint256).max);
         t.approve(address(modifyLiquidityRouter), type(uint256).max);
@@ -124,16 +118,13 @@ contract LaunchTest is Base {
         vm.deal(address(this), 100 ether);
         swapNativeInput(pool, true, -0.5 ether, "", 0.5 ether); // buy $IMDUEL with ETH
         assertEq(st().closeBlock, vm.getBlockNumber(), "the first buy takes White's turn");
-        uint256 dead = t.balanceOf(address(0xdEaD));
         for (uint256 i; i < 30; i++) {
             next(12);
             if (nextTeam() == 1) swapNativeInput(pool, true, -0.5 ether, "", 0.5 ether);
             else swap(pool, false, -20_000_000e18, "");
         }
-        sampleBlocks(pool); // a calm stretch of three blocks
-        next(12);
-        swapNativeInput(pool, true, -0.5 ether, "", 0.5 ether);
-        assertGt(t.balanceOf(address(0xdEaD)), dead, "the ETH slice bought $IMDUEL, half burned");
+        assertGt(hook.owed(DEAD, duel.toId()), 0, "the $IMDUEL slice, half owed to the burn");
+        assertEq(hook.chest(id, 0) + hook.chest(id, 1) > 0, true);
         assertGt(st().ply, 20);
         assertSolvent(nobody());
     }

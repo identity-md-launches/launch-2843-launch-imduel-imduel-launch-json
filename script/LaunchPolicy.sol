@@ -36,8 +36,8 @@ library LaunchPolicy {
     /// in as the launch fills them.
     function hookArgs(Vm vm, string memory json, address manager, address engine) internal pure returns (bytes memory) {
         string[] memory a = vm.parseJsonStringArray(json, ".hook.constructorArgs");
-        require(a.length == 6, "a launch file gives the hook 6 constructor arguments");
+        require(a.length == 4, "a launch file gives the hook 4 constructor arguments");
         require(keccak256(bytes(a[0])) == keccak256("$poolManager") && keccak256(bytes(a[1])) == keccak256("ENGINE_ADDRESS"));
-        return abi.encode(manager, engine, vm.parseAddress(a[2]), vm.parseUint(a[3]), vm.parseUint(a[4]), vm.parseUint(a[5]));
+        return abi.encode(manager, engine, vm.parseAddress(a[2]), vm.parseUint(a[3]));
     }
 }

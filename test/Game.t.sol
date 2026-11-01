@@ -153,19 +153,47 @@ contract GameTest is Base {
         return blockhash(n);
     }
 
-    /// A turn whose block hash the chain no longer serves becomes a timeout turn in the block that notices it.
-    function test_anExpiredTurnBecomesATimeoutTurn() public {
+    /// A turn whose block hash the chain no longer serves keeps its bid's size and strength for nobody: the block that
+    /// notices it becomes its window (audit 2026-11-01 and its review: a seen move can't be re-drawn for profit).
+    function test_anExpiredTurnPlaysItsBidForNobody() public {
         white(1e18, address(0xA));
+        IMDuelHook.TopBid memory paid = bid();
         vm.roll(vm.getBlockNumber() + 300); // past BLOCKHASH's 256, and no history contract here
+        (bool ready,) = hook.previewMove(id, bytes32(uint256(1)));
+        assertFalse(ready, "an expired window previews nothing");
         black(1e18, address(0xB));
         IMDuelHook.Game memory g = st();
         assertEq(g.ply, 0, "not played");
-        assertEq(bid().owner, address(0), "now a timeout turn");
+        assertEq(bid().owner, address(0), "for nobody");
+        assertEq(bid().size, paid.size);
         assertEq(g.closeBlock, vm.getBlockNumber());
         playTurn();
         assertEq(st().ply, 1);
         assertEq(st().moveOwner, address(0));
-        assertEq(st().moveStrength, 0);
+        assertEq(st().moveStrength, paid.strength, "at the paid strength");
+    }
+
+    /// In its closing block a window's move can be previewed with that block's hash (the site calls at the latest
+    /// block, when the chain can't read the hash yet).
+    function test_previewMoveIsReadyInTheClosingBlock() public {
+        white(1e18, address(0xA));
+        assertEq(st().closeBlock, vm.getBlockNumber(), "one-block windows: this block closes it");
+        (bool ready,) = hook.previewMove(id, bytes32(uint256(0x1234)));
+        assertTrue(ready);
+    }
+
+    /// Past its window, previewMove reads the window's hash itself: whatever hash a caller passes, it previews the
+    /// move the next trade plays.
+    function test_previewMoveReadsTheServedHashItself() public {
+        white(1e18, address(0xA));
+        uint256 close = st().closeBlock;
+        next(12);
+        (bool r1, uint16 m1) = hook.previewMove(id, this.hashOf(close));
+        (bool r2, uint16 m2) = hook.previewMove(id, bytes32(uint256(0x1234)));
+        assertTrue(r1 && r2);
+        assertEq(m1, m2, "the caller's hash is not used");
+        playTurn();
+        assertEq(st().ply, 1);
     }
 
     function test_playedPositionsEnterTheRepetitionMemory() public {
@@ -253,11 +281,10 @@ contract GameTest is Base {
     // ---------------------------------------------------------------- configuration
 
     function newHook(HookConfig memory c) internal returns (IMDuelHook) {
-        return new IMDuelHook(c.manager, c.engine, c.imd, c.minImd, c.minImduel, c.turnBlocks);
+        return new IMDuelHook(c.manager, c.engine, c.imd, c.turnBlocks);
     }
 
-    /// Uniswap's hook checklist, item 1: only the PoolManager drives the callbacks, only the hook itself converts
-    /// through its gas-capped call.
+    /// Uniswap's hook checklist, item 1: only the PoolManager drives the callbacks.
     function test_onlyThePoolManagerAndTheHookCanCallIn() public {
         SwapParams memory p = SwapParams(true, -1e18, MIN_PRICE_LIMIT);
         vm.expectRevert(IMDuelHook.NotManager.selector);
@@ -268,8 +295,6 @@ contract GameTest is Base {
         hook.afterSwap(address(this), pool, p, BalanceDelta.wrap(0), "");
         vm.expectRevert(IMDuelHook.NotManager.selector);
         hook.unlockCallback(abi.encode(uint8(0), abi.encode(address(this), currency0, uint256(1))));
-        vm.expectRevert(IMDuelHook.NotSelf.selector);
-        hook.convertBatch(currency0);
     }
 
     function test_rejectsBadConfig() public {

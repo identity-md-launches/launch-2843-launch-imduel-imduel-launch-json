@@ -40,19 +40,24 @@ contract MoneyTest is Base {
 
     // ---------------------------------------------------------------- fees
 
-    function test_firstTradeFundsChest0AndTheSlice() public {
-        trade(1, 1e18, address(0)); // pays 1e18 of currency0 (specified): both chests empty, so chest 0 and the IMD slice
-        assertEq(hook.chest(id, 0), 6.5e15, "0.65% of the input");
-        assertEq(hook.pile(currency0.toId()), 1e15, "0.1% slice in IMD");
-        assertEq(hook.chest(id, 1), 0);
-        assertEq(claims(currency0), 7.5e15);
+    /// A buy of currency1 ($IMDUEL here) with 1 currency0: 0.325% of the input into currency0's pot, 0.325% of the
+    /// output into currency1's pot, and the 0.1% slice of the $IMDUEL side burned (owed to 0x...dEaD).
+    function test_aBuyFeedsBothPotsAndBurnsTheSlice() public {
+        uint256 before = currency1.balanceOfSelf();
+        trade(1, 1e18, address(0));
+        uint256 received = currency1.balanceOfSelf() - before;
+        uint256 out = received + claims(currency1); // what the pool paid out, before the hook's fee
+        assertEq(hook.chest(id, 0), 1e18 * 65 / 20_000, "half the pot fee from the input");
+        assertEq(hook.chest(id, 1), out * 65 / 20_000, "half from the output");
+        assertEq(hook.owed(DEAD, currency1.toId()), out * 10 / 10_000, "the whole slice burned");
+        assertEq(claims(currency0), hook.chest(id, 0));
     }
 
     /// URC-2: every trade emits the hook's own delta (the fee it took, in pool token order, negative from the
     /// swapper's side) and the hook fee rate, so indexers see what the trader really paid.
     function test_everyTradeEmitsHookSwapWithTheHookFee() public {
         vm.recordLogs();
-        trade(1, 1e18, address(0)); // pays 1e18 of currency0: the chest share and the slice both fall in currency0
+        trade(1, 1e18, address(0)); // buys currency1: the pot fee and the slice both fall in currency1, the output
         Vm.Log[] memory logs = vm.getRecordedLogs();
         uint256 n;
         for (uint256 i; i < logs.length; i++) {
@@ -61,8 +66,8 @@ contract MoneyTest is Base {
             assertEq(logs[i].topics[1], PoolId.unwrap(id), "the pool");
             assertEq(address(uint160(uint256(logs[i].topics[2]))), address(swapRouter), "the sender of the swap");
             (int128 a0, int128 a1, uint24 rate) = abi.decode(logs[i].data, (int128, int128, uint24));
-            assertEq(a0, -7.5e15, "0.75% of the input, paid by the swapper");
-            assertEq(a1, 0, "nothing taken in the output");
+            assertEq(uint256(uint128(-a0)), claims(currency0), "half the pot fee, from the input");
+            assertEq(uint256(uint128(-a1)), claims(currency1), "the other half and the slice, from the output");
             assertEq(rate, 7_500, "the hook fee in pips");
         }
         assertEq(n, 1, "one HookSwap per swap");
@@ -71,24 +76,12 @@ contract MoneyTest is Base {
         assertEq(count(vm.getRecordedLogs(), HOOK_SWAP), 0, "no HookSwap without a hook delta");
     }
 
-    function test_chestShareGoesToTheChestWorthLess() public {
-        trade(1, 1e18, address(0)); // chest 0 now holds more: the next chest share goes to chest 1
-        uint256 before = currency1.balanceOfSelf();
-        trade(1, 1e18, address(0));
-        uint256 received = currency1.balanceOfSelf() - before;
-        uint256 toChest1 = hook.chest(id, 1);
-        assertGt(toChest1, 0);
-        assertEq(toChest1, (received + toChest1) * 65 / 10_000, "0.65% of the output, in currency1");
-        assertEq(hook.pile(currency0.toId()), 2e15, "the slice stays in IMD");
-        assertEq(hook.chest(id, 0), 6.5e15, "chest 0 unchanged");
-        assertSolvent(nobody());
-    }
-
-    function test_chestsStayAboutEqualInValue() public {
-        for (uint256 i; i < 30; i++) trade(1, 1e18, address(0)); // one-sided trading
-        uint256 c0 = hook.chest(id, 0);
-        uint256 c1 = hook.chest(id, 1);
-        assertApproxEqRel(c0, c1, 0.2e18, "within 20% at a price near 1");
+    /// Every trade feeds both pots by about the same value: one-sided buying still keeps them balanced (1:1 here).
+    function test_everyTradeFeedsBothPots() public {
+        for (uint256 i; i < 10; i++) trade(0, 1e18, address(0)); // buys currency0 only
+        assertEq(hook.chest(id, 1), 10 * (1e18 * 65 / 20_000), "the input side's half, in currency1");
+        assertApproxEqRel(hook.chest(id, 0), hook.chest(id, 1), 0.01e18, "the output side's half, about as much");
+        assertEq(hook.owed(DEAD, currency1.toId()), 10 * 0.001e18, "the slice of the $IMDUEL input, burned");
         assertSolvent(nobody());
     }
 
@@ -101,30 +94,33 @@ contract MoneyTest is Base {
         swapRouter.swap(pool, SwapParams(true, -100e18, SQRT_PRICE_1_1 * 99_999 / 100_000), PoolSwapTest.TestSettings(false, false), "");
         assertEq(currency0.balanceOfSelf(), before, "nothing paid");
         swapRouter.swap(pool, SwapParams(true, -1e18, SQRT_PRICE_1_1 * 99_999 / 100_000), PoolSwapTest.TestSettings(false, false), "");
-        assertEq(claims(currency0), 7.5e15, "a trade that fits inside its limit goes through, at 0.75%");
+        assertGt(claims(currency1), 0, "a trade that fits inside its limit goes through");
     }
 
-    /// Exact output with the chest share in the output (the specified side, taken before the swap): the trader gets
-    /// exactly what it asked for and the full-fill check counts the fee the pool swapped on top.
-    function test_exactOutputWithTheChestShareInTheOutput() public {
-        trade(1, 1e18, address(0)); // chest 0 now holds more: the next chest share goes to chest 1
-        next(12);
+    /// Exact output with fees in the output (the specified side, taken before the swap): the trader gets exactly what
+    /// it asked for; half the pot fee and the slice come off that output, the other half off the input.
+    function test_exactOutputWithTheFeeInTheOutput() public {
         uint256 before = currency1.balanceOfSelf();
         swap(pool, true, 1e18, ""); // exact output of 1 currency1
         assertEq(currency1.balanceOfSelf() - before, 1e18, "exactly what was asked for");
-        assertEq(hook.chest(id, 1), 6.5e15, "0.65% of the output, taken before the swap");
+        assertEq(hook.chest(id, 1), 1e18 * 65 / 20_000, "half the pot fee from the output");
+        assertEq(hook.owed(DEAD, currency1.toId()), 0.001e18, "the slice, burned");
+        assertGt(hook.chest(id, 0), 0, "the other half from the input");
     }
 
-    function test_exactOutputPaysTheFeeOnTheInput() public {
-        uint256 inBefore = currency0.balanceOfSelf();
-        uint256 outBefore = currency1.balanceOfSelf();
-        swap(pool, true, 1e18, ""); // exact output of currency1: the fees fall on the unspecified input
-        uint256 spent = inBefore - currency0.balanceOfSelf();
-        assertEq(currency1.balanceOfSelf() - outBefore, 1e18, "the specified output is preserved");
-        uint256 fee = claims(currency0);
-        uint256 poolIn = spent - fee;
-        assertEq(fee, poolIn * 65 / 10_000 + poolIn * 10 / 10_000, "0.65% + 0.1% of the pool's input");
-        assertEq(hook.chest(id, 0) + hook.pile(currency0.toId()), fee);
+    /// Exact output of currency0: half the pot fee falls on that output, the other half and the slice on the
+    /// unspecified $IMDUEL input.
+    function test_exactOutputSlicesTheInput() public {
+        uint256 inBefore = currency1.balanceOfSelf();
+        uint256 outBefore = currency0.balanceOfSelf();
+        swap(pool, false, 1e18, ""); // exact output of 1 currency0
+        assertEq(currency0.balanceOfSelf() - outBefore, 1e18, "the specified output is preserved");
+        assertEq(hook.chest(id, 0), 1e18 * 65 / 20_000, "half the pot fee from the output");
+        uint256 spent = inBefore - currency1.balanceOfSelf();
+        uint256 poolIn = spent - claims(currency1);
+        assertEq(hook.chest(id, 1), poolIn * 65 / 20_000, "half from the pool's input");
+        assertEq(hook.owed(DEAD, currency1.toId()), poolIn * 10 / 10_000, "the slice of the pool's input, burned");
+        assertSolvent(nobody());
     }
 
     // ---------------------------------------------------------------- rewards
@@ -322,11 +318,11 @@ contract MoneyTest is Base {
         }
         vm.expectRevert(IMDuelHook.BadValue.selector);
         hook.fundChest(pool, false, 1);
-        trade(1, 1e18, address(0)); // chest 0 is the one worth less at 1:1, and it is full
+        trade(1, 1e18, address(0)); // buys currency1, whose pot is full
         assertEq(hook.chest(id, 0), full);
         assertEq(hook.chest(id, 1), full);
-        assertEq(hook.pile(currency0.toId()), 1e15, "the slice is still taken");
-        assertEq(claims(currency0), full + 1e15);
+        assertGt(hook.owed(DEAD, currency1.toId()), 0, "the burn half of the slice is still taken");
+        assertEq(claims(currency1), full + hook.owed(DEAD, currency1.toId()), "nothing else");
         assertSolvent(nobody());
     }
 

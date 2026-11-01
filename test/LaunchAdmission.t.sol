@@ -27,6 +27,7 @@ contract LaunchAdmissionTest is V4Fixture {
 
     address constant IMD = 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7; // IMD on Ethereum
     address constant ENGINE = 0xc21788F704a8b9456f7391A01d8a3D95Be215a27; // ChessEngineV5, launch 2643
+    address constant DEAD = 0x000000000000000000000000000000000000dEaD; // where the $IMDUEL burn is owed
     Currency imd = Currency.wrap(IMD);
     IMDuelHook hook;
     PoolKey key;
@@ -82,7 +83,7 @@ contract LaunchAdmissionTest is V4Fixture {
         assertEq(address(hook.engine()), ENGINE);
         assertEq(Currency.unwrap(hook.imd()), IMD);
 
-        // callbacks and self-calls refuse outsiders
+        // callbacks refuse outsiders
         SwapParams memory p = SwapParams(true, -1, 0);
         vm.expectRevert(IMDuelHook.NotManager.selector);
         hook.afterInitialize(address(this), key, 0, 0);
@@ -92,8 +93,6 @@ contract LaunchAdmissionTest is V4Fixture {
         hook.afterSwap(address(this), key, p, BalanceDelta.wrap(0), "");
         vm.expectRevert(IMDuelHook.NotManager.selector);
         hook.unlockCallback("");
-        vm.expectRevert(IMDuelHook.NotSelf.selector);
-        hook.convertBatch(imd);
 
         // the factory's pool: the token with IMD at the policy's price, single-sided seed
         bool tokenIs0 = token < imd;
@@ -142,9 +141,9 @@ contract LaunchAdmissionTest is V4Fixture {
         buy(10e18);
         sell(1_000_000e18);
         uint256 held = manager.balanceOf(address(hook), c0.toId());
-        assertEq(held, hook.chest(key.toId(), 0) + hook.pile(c0.toId()), "held = chest + pile (currency0)");
+        assertEq(held, hook.chest(key.toId(), 0) + hook.owed(DEAD, c0.toId()), "held = chest + burn (currency0)");
         held = manager.balanceOf(address(hook), c1.toId());
-        assertEq(held, hook.chest(key.toId(), 1) + hook.pile(c1.toId()), "held = chest + pile (currency1)");
+        assertEq(held, hook.chest(key.toId(), 1) + hook.owed(DEAD, c1.toId()), "held = chest + burn (currency1)");
     }
 
     function test_blankChainTokenBelowImd() public {
