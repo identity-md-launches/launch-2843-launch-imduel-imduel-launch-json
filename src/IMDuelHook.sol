@@ -28,7 +28,8 @@ interface IERC20Min {
 /// endless series of games between its two tokens. Buying a token plays for its team; the teams swap colours every
 /// game. Every buy bids for its team's next move, at a strength set by what it received as a share of its team's pot;
 /// the biggest owns the move, and a new top bid must beat the old one by more than 10%. A move stays open for
-/// `turnBlocks` blocks after the previous one was played; the first trade after that plays it, with the hash of the
+/// `turnBlocks` blocks after the previous one was played (one whose first bid comes only in its last block or later
+/// stays open `turnBlocks` blocks from that bid); the first trade after that plays it, with the hash of the
 /// window's last block as the dice, so a bidder can't know the move while it can still bid. The one exception is
 /// whoever builds that last block: it can bid in it and try several versions of it, keeping the hash whose move pays
 /// (an accepted risk).
@@ -436,8 +437,10 @@ contract IMDuelHook is IUnlockCallback {
             : (_abs(delta.amount1()), _abs(delta.amount0()));
         if (team == mover) {
             if (_beats(paid, b)) {
-                // the window passed without a bid (else _resolve just played or reopened it): this block is it
-                if (block.number > g.closeBlock) g.closeBlock = uint40(block.number);
+                // the move's first bid in its window's last block or after it (the window passed without a bid, else
+                // _resolve just played or reopened it): a full window from this block, so the team can answer it
+                // (swarm audit 74895075, L-1: a dust bid there played a silent team's move at 0% with no answer)
+                if (!b.open && block.number >= g.closeBlock) g.closeBlock = uint40(block.number + turnBlocks - 1);
                 _bid(id, g, team, g.ply, _trade(id, team, paid, got, hookData));
             }
         } else {
@@ -720,6 +723,9 @@ contract IMDuelHook is IUnlockCallback {
         return uint64((k < 4 ? lo : hi) >> ((k & 3) * 64));
     }
 
+    /// Whether the position just reached is there for the third time, counting itself and the positions up to sixteen
+    /// half-moves earlier (the ring's eight of this side to move, the oldest written over only after this check), and
+    /// the start position from any distance.
     function _repeated(PoolId id, Game storage g) internal view returns (bool) {
         // A position needs at least four reversible half-moves to recur (each side out and back), and nothing before
         // the last capture or pawn move can recur; skips the reads on most swaps.

@@ -11,8 +11,9 @@ library Chess {
     uint32 internal constant START_WHITE = 0x000704ff;
     uint32 internal constant START_BLACK = 0x383f3cff;
 
-    /// IMDuel's draw rules beyond stalemate, too little material and a position's third time within the last sixteen
-    /// half-moves (a repetition further apart is left to the quiet-move limit).
+    /// IMDuel's draw rules beyond stalemate, too little material and a position's third time, counting itself and the
+    /// positions up to sixteen half-moves earlier (the start position counts from any distance; a repetition further
+    /// apart is left to the quiet-move limit).
     uint16 internal constant MAX_PLY = 200;
     uint16 internal constant MAX_QUIET_PLY = 60; // half-moves without a capture or pawn move
 

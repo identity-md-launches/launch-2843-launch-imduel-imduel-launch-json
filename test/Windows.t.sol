@@ -82,6 +82,45 @@ contract WindowsTest is Base {
         assertEq(st().moveOwner, address(0xA), "with the window's hash, for its owner");
     }
 
+    /// Swarm audit 74895075, L-1: a dust buy of a silent team's token, in its window's last block or after it, used to
+    /// own the move at 0% with a one-block window nobody could answer. Now it opens a full window: the team's own bid
+    /// in the next block takes the move, at its strength.
+    function lateDust(uint256 after_) internal {
+        hook.fundChest(pool, false, 100e18);
+        hook.fundChest(pool, true, 100e18);
+        vm.roll(st().closeBlock + after_);
+        trade(whiteTeam(), 1_000, address(0xBAD));
+        assertEq(bid().owner, address(0xBAD));
+        assertEq(bid().strength, 0, "dust plays at 0%");
+        assertEq(st().closeBlock, vm.getBlockNumber() + 2, "a full window to answer it");
+        next(12);
+        white(10e18, address(0x7EA)); // the team answers in the next block
+        assertEq(bid().owner, address(0x7EA));
+        vm.roll(st().closeBlock + 1);
+        black(1e17, address(0));
+        assertEq(st().ply, 1);
+        assertEq(st().moveOwner, address(0x7EA), "the team's move, not the dust's");
+        assertGt(st().moveStrength, 0);
+    }
+
+    function test_dustInTheClosingBlockCanBeAnswered() public {
+        lateDust(0);
+    }
+
+    function test_dustAfterTheWindowCanBeAnswered() public {
+        lateDust(5);
+    }
+
+    /// A first bid inside its window keeps the window's end; later bids never move it.
+    function test_onlyALateFirstBidMovesTheWindow() public {
+        uint256 close = st().closeBlock;
+        white(1e18, address(0xA)); // the window's first block
+        assertEq(st().closeBlock, close, "a first bid in the window keeps its end");
+        vm.roll(close);
+        white(2e18, address(0xB)); // a raise in the last block
+        assertEq(st().closeBlock, close, "a raise never moves it");
+    }
+
     /// One block before a window closes nothing is previewed; in the closing block it is.
     function test_noPreviewBeforeTheClosingBlock() public {
         white(1e18, address(0xA));

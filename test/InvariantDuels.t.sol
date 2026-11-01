@@ -134,7 +134,11 @@ contract DuelsHandler is Test {
         if (opened) need(time >= a.turnStart + hook.TURN_TIMEOUT(), "SP-04 a timeout only after silence");
         // SP-06: a move's window closes: past it, its bid is final; it only moves to the block a first bid lands in
         if (was.open && now_ > a.closeBlock && !expired) need(cur.owner == was.owner && cur.size == was.size, "SP-06 a closed window takes no bids");
-        need(b.closeBlock == a.closeBlock || b.closeBlock == now_, "SP-06 a window only moves to this block");
+        // a window moves only to this block (a timeout, an expired hash) or, at a move's first bid in or after its
+        // last block, to a full window from it
+        bool firstLate = !was.open && cur.open && now_ >= a.closeBlock;
+        need(b.closeBlock == a.closeBlock || b.closeBlock == now_ || (firstLate && b.closeBlock == now_ + hook.turnBlocks() - 1),
+            "SP-06 a window only moves to this block, or opens in full at a late first bid");
     }
 
     receive() external payable {}

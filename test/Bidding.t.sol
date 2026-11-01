@@ -108,14 +108,18 @@ contract BiddingTest is Base {
         assertEq(st().closeBlock, vm.getBlockNumber() + 2);
     }
 
-    function test_aWindowWithoutBidsBecomesTheFirstBidsBlock() public {
+    /// A move whose window passed without a bid opens a full window at its first bid, so the team can answer it.
+    function test_aLateFirstBidOpensAFullWindow() public {
         blocks(5); // White's window passes without a bid
         white(1e18, address(0xA));
-        assertEq(st().closeBlock, vm.getBlockNumber(), "this block is the window now");
-        white(3e18, address(0xB)); // a bigger buy in the same block takes it
+        assertEq(st().closeBlock, vm.getBlockNumber() + 2, "three blocks from the first bid");
+        white(3e18, address(0xB)); // a bigger buy in the same block takes it, and the window stays
+        assertEq(st().closeBlock, vm.getBlockNumber() + 2);
         next(12);
+        white(4e18, address(0xC)); // and one in the next block
+        blocks(2);
         black(1e17, address(0));
-        assertEq(st().moveOwner, address(0xB));
+        assertEq(st().moveOwner, address(0xC));
     }
 
     // ---------------------------------------------------------------- the dice
