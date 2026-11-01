@@ -204,8 +204,8 @@ contract MatePotTest is Base {
         assertEq(hook.chest(id, 1 - w), 100e18, "the pot kept everything");
     }
 
-    /// The prize is at most what the losing team's buyers paid into its pot this game; the winner's pot's inflow never
-    /// counts (no price is read to value it).
+    /// The prize is at most what this game's trades paid into the losing pot; the winner's pot's inflow never counts
+    /// (no price is read to value it).
     function test_thePrizeIsAtMostTheLosersOwnInflow() public {
         setUpOrder(false);
         fund();
@@ -231,7 +231,7 @@ contract MatePotTest is Base {
         assertEq(hook.owed(address(0xA), token(1 - w).toId()), 0);
     }
 
-    /// Through the real path: the loser's buyers' pot fees cap the prize, far under the quarter and the 2x bid; the
+    /// Through the real path: the game's pot fees into the losing pot cap the prize, far under the quarter and the 2x bid; the
     /// resolving trade's fee, however big, counts for the next game, the one its bid is for (audit 2026-11-01, L-1).
     function test_aShortGamePaysTheLosersFeesNotTheResolvingTrades() public {
         setUpOrder(false);
@@ -239,7 +239,7 @@ contract MatePotTest is Base {
         uint256 loser = whiteTeam(); // White gets mated
         forcedMate(true); // Black's only move mates
         hook.setGameIn(id, 0, 0); // nothing traded yet this game
-        white(1e18, address(0xA)); // White's buyers pay into White's pot (a bid for White's next move)
+        white(1e18, address(0xA)); // half its pot fee into each pot (a bid for White's next move)
         black(1e18, address(0xB)); // the mating bid, into Black's pot
         (uint256 in0, uint256 in1) = hook.gameInflow(id, 0);
         uint256 own = loser == 0 ? in0 : in1;
@@ -247,7 +247,7 @@ contract MatePotTest is Base {
         next(12);
         white(1e23, address(0)); // plays the mate
         assertEq(st().gameNo, 1, "mate");
-        assertEq(hook.owed(address(0xB), token(loser).toId()), own, "exactly the loser's buyers' pot fees");
+        assertEq(hook.owed(address(0xB), token(loser).toId()), own, "exactly the pot fees into the losing pot");
         (uint256 next0, uint256 next1) = hook.gameInflow(id, 1);
         assertGt(next0 + next1, 5e20, "the resolving trade's 0.65% counts for game 1");
     }

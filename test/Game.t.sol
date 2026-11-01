@@ -243,7 +243,7 @@ contract GameTest is Base {
         hook.applyMove(pool, mv("a1", "a8"), address(0xA11CE), 0); // back-rank mate ends game 0
         assertEq(st().gameNo, 1);
         next(12);
-        trade(1, 1e18, address(0xA)); // currency1's team now plays Black: no bid
+        trade(1, 1e18, address(0xA)); // currency1's team now plays Black: a bid for its next move, not this one
         assertFalse(bid().open);
         trade(0, 1e18, address(0xB)); // currency0's team plays White
         assertEq(bid().owner, address(0xB));

@@ -16,7 +16,7 @@ import {LaunchPolicy} from "../script/LaunchPolicy.sol";
 
 /// The main duel opened the way the IMD launch factory opens a hook launch (launch.json; live launch 2406): the hook
 /// is deployed, then in the same transaction a fresh 1B-supply token is minted and its pool with IMD opened at fee
-/// 12500 and spacing 60, at the policy's price (2,500 IMD for the whole supply), and 85% of the supply
+/// 12500 and spacing 60, at the policy's price (2,500 IMD for the whole supply), and 80% of the supply
 /// (LaunchPolicy.SEED_BPS) is seeded single-sided in the token. $IMDUEL's address can sort either side of IMD's; both are tested.
 contract LaunchTest is Base {
     using CurrencyLibrary for Currency;
@@ -83,14 +83,14 @@ contract LaunchTest is Base {
         assertEq(st().ply, 1, "White's move is played");
         assertTrue(bid().open && bid().owner == tx.origin, "a sell bids for Black");
 
-        // trading on: every trade's slice is $IMDUEL, half owed to the burn and half into the $IMDUEL pot
+        // trading on: every trade's slice is $IMDUEL, all of it owed to the burn
         for (uint256 i; i < 30; i++) {
             next(12);
             if (nextTeam() == (duel == pool.currency0 ? 0 : 1)) buy(100e18);
             else sell(2_000_000e18);
         }
         uint256 owed = hook.owed(DEAD, duel.toId());
-        assertGt(owed, 0, "half of every slice owed to the burn");
+        assertGt(owed, 0, "every slice owed to the burn");
         hook.withdraw(DEAD, duel);
         assertEq(MockERC20(Currency.unwrap(duel)).balanceOf(DEAD), owed - 1, "burned by anyone's withdraw");
         assertGt(hook.chest(id, duel == pool.currency0 ? 0 : 1), 0, "the $IMDUEL pot grows");
@@ -123,7 +123,7 @@ contract LaunchTest is Base {
             if (nextTeam() == 1) swapNativeInput(pool, true, -0.5 ether, "", 0.5 ether);
             else swap(pool, false, -20_000_000e18, "");
         }
-        assertGt(hook.owed(DEAD, duel.toId()), 0, "the $IMDUEL slice, half owed to the burn");
+        assertGt(hook.owed(DEAD, duel.toId()), 0, "the $IMDUEL slice, owed to the burn");
         assertEq(hook.chest(id, 0) + hook.chest(id, 1) > 0, true);
         assertGt(st().ply, 20);
         assertSolvent(nobody());

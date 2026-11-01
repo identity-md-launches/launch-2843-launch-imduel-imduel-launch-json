@@ -107,7 +107,8 @@ contract IMDuelHook is IUnlockCallback {
         uint256 board;
     }
 
-    /// A team's top bid for its next move: owner 0 and size 0 for a timeout move.
+    /// A team's top bid for its next move. Owner 0 is a move for nobody: a timeout's (size 0) or one whose dice hash
+    /// expired (its paid size and strength kept, _resolve).
     struct TopBid {
         address owner;
         uint16 strength;
@@ -135,9 +136,9 @@ contract IMDuelHook is IUnlockCallback {
     PoolId public mainId;
     // Each pool's pot inflow this game, for the mate's inflow cap: the game number in the top 32 bits, then pot 1's
     // and pot 0's inflow in 112 bits each (the pot fee only, half of every trade's into each; donations and slices
-    // don't count), recorded after the trade's move,
-    // so a trade that ends a game counts for the next one, the game its bid is for. A slot left by an earlier game
-    // reads as empty, so nothing is cleared between games. Read through gameInflow.
+    // don't count), recorded after the trade's move for the game then in progress, so a trade that ends a game counts
+    // for the next one. A slot left by an earlier game reads as empty, so nothing is cleared between games. Read
+    // through gameInflow.
     mapping(PoolId => uint256) internal gameIn;
     mapping(address => mapping(uint256 => uint256)) public owed; // rewards to claim (withdraw), by currency id
     // Per player: [0] counts per move, [1] rarer counts (layout at stats()); never read by any rule of the game
@@ -312,6 +313,8 @@ contract IMDuelHook is IUnlockCallback {
         uint256 fee = toChest + (g.slice == idx ? _slice(c, amount * SLICE_BPS / 10_000) : 0);
         if (fee == 0) return 0;
         manager.mint(address(this), c.toId(), fee);
+        // fee is under 1% of a v4 swap amount, which fits int128
+        // forge-lint: disable-next-line(unsafe-typecast)
         return int128(int256(fee));
     }
 
@@ -476,6 +479,8 @@ contract IMDuelHook is IUnlockCallback {
     /// Makes `t` team `team`'s top bid for half-move `ply`.
     function _bid(PoolId id, Game storage g, uint256 team, uint16 ply, Trade memory t) internal {
         TopBid storage b = g.bids[team];
+        // a bid's size is a swap amount (an int128's magnitude) or a kept bid's size: it fits
+        // forge-lint: disable-next-line(unsafe-typecast)
         (b.owner, b.strength, b.open, b.size) = (t.owner, t.strength, true, uint128(t.size));
         emit Bid(id, g.gameNo, ply, t.owner, t.size, t.strength);
     }

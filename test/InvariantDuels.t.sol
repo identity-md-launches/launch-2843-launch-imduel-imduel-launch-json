@@ -27,7 +27,7 @@ function need(bool ok, string memory why) pure {
     if (!ok) revert(why);
 }
 
-/// Random actions across several duels on one hook, every slice going to the main duel's pots. Every action
+/// Random actions across several duels on one hook, every slice burned or (in IMD) put in the main duel's IMD pot. Every action
 /// must succeed (fail_on_revert), and each checks the properties of what it just did (SP-01..06; the global ones are
 /// GL-01..05 below). Runs under Foundry, Echidna and Medusa (test/fuzz/): only cheatcodes all support, except the event
 /// checks, which only Foundry records (`withEvents`), and queued mates, which need the test harness (Foundry).
@@ -93,7 +93,7 @@ contract DuelsHandler is Test {
         return keccak256(abi.encode(hook.game(pools[i].toId())));
     }
 
-    /// SP-05: a mate pays at most what the losing team's buyers paid into its pot that game (`inflow`, read before the
+    /// SP-05: a mate pays at most what that game's trades paid into the losing pot (`inflow`, read before the
     /// trade that played it: that trade's own fee counts for the next game), and at most a quarter of the pot it was
     /// paid from (every fee goes in before the move is played, so that pot is `potAfter` plus the payout).
     function _checkMates(Vm.Log[] memory entries, PoolKey memory k, uint256[2] memory inflow, uint256[2] memory potAfter) internal {
@@ -101,7 +101,7 @@ contract DuelsHandler is Test {
             if (entries[i].topics[0] != MATE_PAID) continue;
             (,, Currency c, uint256 amount) = abi.decode(entries[i].data, (uint32, address, Currency, uint256));
             uint256 loser = c == k.currency0 ? 0 : 1;
-            need(amount <= inflow[loser], "SP-05 a mate pays at most the loser's buyers' pot fees that game");
+            need(amount <= inflow[loser], "SP-05 a mate pays at most the pot fees into the losing pot that game");
             need(amount * 3 <= potAfter[loser], "SP-05 at most a quarter of the loser's pot");
             mates++;
         }
@@ -231,7 +231,7 @@ contract DuelsHandler is Test {
         trade(p, zeroForOne, size, owner, false);
     }
 
-    /// A liquidity provider stepping in and out (full range, its own salt): strengths and chest values move with it.
+    /// A liquidity provider stepping in and out (full range, its own salt): neither strength nor pots may move with it.
     /// Fees earned so far are collected first (v4's test router asserts an addition only owes).
     function addLiquidity(uint8 p, uint256 liquidity) external {
         PoolKey memory k = pools[p % pools.length];

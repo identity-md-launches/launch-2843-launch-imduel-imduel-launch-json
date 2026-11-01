@@ -33,7 +33,7 @@ abstract contract V4Fixture is Test {
     PoolModifyLiquidityTest modifyLiquidityRouter;
     address feeController;
 
-    function deployV4() internal {
+    function deployV4() internal virtual {
         manager = IPoolManager(vm.deployCode("PoolManager.sol:PoolManager", abi.encode(address(this))));
         bytes memory args = abi.encode(manager);
         swapRouter = PoolSwapTest(vm.deployCode("PoolSwapTest.sol:PoolSwapTest", args));
@@ -50,7 +50,7 @@ abstract contract V4Fixture is Test {
         return Currency.wrap(address(token));
     }
 
-    function mockToken(string memory name, string memory symbol) internal returns (MockERC20) {
+    function mockToken(string memory name, string memory symbol) internal virtual returns (MockERC20) {
         return MockERC20(vm.deployCode("lib/v4-core/lib/solmate/src/test/utils/mocks/MockERC20.sol:MockERC20",
             abi.encode(name, symbol, uint8(18))));
     }

@@ -91,7 +91,8 @@ abstract contract Base is Chessboard, V4Fixture {
         swap(pool, team == 1, -int256(amountIn), owner == address(0) ? bytes("") : abi.encodePacked(owner));
     }
 
-    /// The team playing White in the current game: in game 0 the side the slice isn't taken in, then alternating.
+    /// The team playing White in the current game: in game 0 the side that isn't the base (IMD's side, else
+    /// $IMDUEL's), then alternating.
     function whiteTeam() internal view returns (uint256) {
         return (st().gameNo & 1) ^ (st().base ^ 1);
     }

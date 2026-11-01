@@ -84,10 +84,10 @@ contract HookGasTest is Base {
             (uint256 b, uint32 w, uint32 k) = replay(3, 30);
             hook.setPosition(id, b, w, k, 30, 0);
         }
-        trade(1 - whiteTeam(), 1e20, address(0xC)); // warms up the pool (first fees); not White's turn, so no bid
+        trade(1 - whiteTeam(), 1e20, address(0xC)); // warms up the pool (first fees); a bid for Black's next move
         uint256 firstBid = gasOf(whiteTeam(), 1e20, address(0xA)); // the pool's first turn: its storage starts at zero
         uint256 outbidding = gasOf(whiteTeam(), 3e20, address(0xB)); // a bigger bid in the same block
-        uint256 plain = gasOf(1 - whiteTeam(), 1e20, address(0xC)); // the other team: no bid, nothing to play
+        uint256 plain = gasOf(1 - whiteTeam(), 1e20, address(0xC)); // the other team, not 10% more: no new bid, nothing to play
         next(12);
         uint256 playing = gasOf(1 - toMove(), 1e20, address(0xD)); // plays White's move, then bids for Black
         next(12);

@@ -24,8 +24,9 @@ contract RefusesEth {
     }
 }
 
-/// Fees (0.65% to the pot worth less, 0.1% slice), the mate payout (a quarter of the loser's pot to the move that mated,
-/// at most twice what its trade paid), claims, pot funding and solvency. Main duel: currency0 = "IMD", currency1 =
+/// Fees (half the 0.65% pot fee from each side into that token's pot, the 0.1% slice in $IMDUEL, burned), the mate
+/// payout (a quarter of the loser's pot to the move that mated, at most twice what its trade paid), claims, pot funding
+/// and solvency. Main duel: currency0 = "IMD", currency1 =
 /// "$IMDUEL".
 contract MoneyTest is Base {
     using CurrencyLibrary for Currency;
@@ -321,7 +322,7 @@ contract MoneyTest is Base {
         trade(1, 1e18, address(0)); // buys currency1, whose pot is full
         assertEq(hook.chest(id, 0), full);
         assertEq(hook.chest(id, 1), full);
-        assertGt(hook.owed(DEAD, currency1.toId()), 0, "the burn half of the slice is still taken");
+        assertGt(hook.owed(DEAD, currency1.toId()), 0, "the slice is still taken and burned");
         assertEq(claims(currency1), full + hook.owed(DEAD, currency1.toId()), "nothing else");
         assertSolvent(nobody());
     }

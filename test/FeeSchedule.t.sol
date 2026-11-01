@@ -30,9 +30,8 @@ contract RefusesEthUntilAsked {
     }
 }
 
-/// The fee split (0.65% to the pot worth less, 0.1% slice, the same from a duel's first trade), the refusals around
-/// pots and owed payouts, and the main duel's one-batch-per-block limit.
-/// Main duel: currency0 = "IMD", currency1 = "$IMDUEL"; the slice is taken in IMD.
+/// The fee on exact-output and partial orders (half the 0.65% pot fee from each side, the 0.1% slice in $IMDUEL,
+/// burned), and the refusals around pots and owed payouts. Main duel: currency0 = "IMD", currency1 = "$IMDUEL".
 contract FeeScheduleTest is Base {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;

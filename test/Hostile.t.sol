@@ -318,7 +318,7 @@ contract HostileTest is Base {
         if (creditsTheHook) {
             r.creditTheHook(address(hook));
             vm.deal(address(r), 1 ether);
-            // the other chest worth more, so the fee is taken on the ETH side and the hook holds an ETH delta when it pays
+            // a funded token pot as well, so the hook holds deltas on both sides when the move pays
             MockERC20(Currency.unwrap(pool.currency1)).approve(address(hook), type(uint256).max);
             hook.fundChest(pool, true, 100e18);
         }
